@@ -304,14 +304,39 @@ public final class JavaOperatorProfiler {
         }
     }
 
+    /**
+     * GC-independent name of a collector, so every garbage collector fills the same columns:
+     * young (G1 Young Generation, Copy, PS Scavenge), old (G1 Old Generation, MarkSweepCompact, PS MarkSweep),
+     * other (for example ZGC Cycles/Pauses).
+     */
+    static String gcKind(String name) {
+        String n = name.toLowerCase();
+        if (n.contains("young") || n.equals("copy") || n.contains("scavenge") || n.contains("parnew")) return "young";
+        if (n.contains("old") || n.contains("marksweep")) return "old";
+        return "other";
+    }
+
+    /** GC-independent name of a heap pool: eden, survivor, old (G1 Old Gen, Tenured Gen, PS Old Gen) or other_heap. */
+    static String heapPoolKind(String name) {
+        String n = name.toLowerCase();
+        if (n.contains("eden")) return "eden";
+        if (n.contains("survivor")) return "survivor";
+        if (n.contains("old") || n.contains("tenured")) return "old";
+        return "other_heap";
+    }
+
     /** JVM counters that only grow, read before and after a run. */
     static Map<String, Long> jvmCounters() {
         Map<String, Long> m = new TreeMap<>();
+        for (String k : List.of("young", "old", "other")) {
+            m.put("gc_" + k + "_count", 0L);
+            m.put("gc_" + k + "_ms", 0L);
+        }
         long n = 0, t = 0;
         for (GarbageCollectorMXBean gc : ManagementFactory.getGarbageCollectorMXBeans()) {
             long cn = Math.max(0, gc.getCollectionCount()), ct = Math.max(0, gc.getCollectionTime());
-            m.put("gc_" + slug(gc.getName()) + "_count", cn);
-            m.put("gc_" + slug(gc.getName()) + "_ms", ct);
+            m.merge("gc_" + gcKind(gc.getName()) + "_count", cn, Long::sum);
+            m.merge("gc_" + gcKind(gc.getName()) + "_ms", ct, Long::sum);
             n += cn;
             t += ct;
         }
@@ -331,12 +356,18 @@ public final class JavaOperatorProfiler {
     /** Peak use of every memory pool since the last reset, plus heap and non-heap totals. */
     static Map<String, Long> poolPeaks() {
         Map<String, Long> m = new TreeMap<>();
+        for (String k : List.of("eden", "survivor", "old", "other_heap")) m.put("pool_" + k + "_peak_bytes", 0L);
         long heap = 0, nonHeap = 0;
         for (MemoryPoolMXBean p : ManagementFactory.getMemoryPoolMXBeans()) {
             long used = p.getPeakUsage().getUsed();
-            m.put("pool_" + slug(p.getName()) + "_peak_bytes", used);
-            if (p.getType() == MemoryType.HEAP) heap += used;
-            else nonHeap += used;
+            if (p.getType() == MemoryType.HEAP) {
+                // Heap pools are named after the GC; store them under GC-independent names.
+                m.merge("pool_" + heapPoolKind(p.getName()) + "_peak_bytes", used, Long::sum);
+                heap += used;
+            } else {
+                m.put("pool_" + slug(p.getName()) + "_peak_bytes", used); // code cache, metaspace: same for every GC
+                nonHeap += used;
+            }
         }
         m.put("heap_peak_bytes", heap);
         m.put("nonheap_peak_bytes", nonHeap);

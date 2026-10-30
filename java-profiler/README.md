@@ -52,11 +52,13 @@ Stopping and restarting continues where it left off.
 | CPU | `thread_cpu_exec_ns`, `thread_user_exec_ns`, `process_cpu_ns`, `os_user_ns`, `os_system_ns`, `os_user_pcore_ns`, `os_runnable_ns`, `os_cpu_qos_*` | ThreadMXBean, OS |
 | Hardware | `os_instructions`, `os_cycles`, `os_*_pcore` | OS (Apple Silicon counters) |
 | Energy | `os_energy_nj`, `os_energy_pcore_nj` | OS (macOS); Linux: `os_energy_pkg_nj` from RAPL, whole CPU package |
-| Memory | `thread_alloc_exec_bytes`, `total_alloc_bytes`, `live_heap_after_gc_max_bytes`, `heap_peak_bytes`, `pool_*_peak_bytes`, `os_phys_footprint_bytes_delta`, `os_resident_bytes_delta` | MXBeans, OS |
-| GC / JIT | `gc_count`, `gc_time_ms`, `gc_<collector>_*`, `gc_max_pause_ms`, `jit_compile_ms`, `classes_loaded` | MXBeans |
+| Memory | `thread_alloc_exec_bytes`, `total_alloc_bytes`, `live_heap_after_gc_max_bytes`, `heap_peak_bytes`, `pool_eden/survivor/old_peak_bytes`, `os_phys_footprint_bytes_delta`, `os_resident_bytes_delta` | MXBeans, OS |
+| GC / JIT | `gc_count`, `gc_time_ms`, `gc_young_*`, `gc_old_*`, `gc_max_pause_ms`, `jit_compile_ms`, `classes_loaded` | MXBeans |
 | Disk | `os_disk_read_bytes`, `os_disk_write_bytes`, `os_logical_write_bytes`, `os_pageins`, `out_bytes` | OS |
 | OS activity | `os_page_faults`, `os_cow_faults`, `os_context_switches`, `os_syscalls_unix`, `os_syscalls_mach`, `os_threads_*` | OS |
 | Network | `network_bytes` | always 0: the Java platform runs inside one JVM |
+
+GC columns have the same names for every garbage collector: `gc_young_*` (G1 young, Serial Copy, Parallel Scavenge), `gc_old_*` (G1 old, MarkSweepCompact, PS MarkSweep), `gc_other_*` (e.g. ZGC), and heap pools `pool_eden_peak_bytes`, `pool_survivor_peak_bytes`, `pool_old_peak_bytes`, `pool_other_heap_peak_bytes`. So every row fills every column, whichever GC the resource setting uses.
 
 `*_exec_*` columns start at the first record, so they leave out Wayang's plan optimization; `*_total_*`
 cover the whole `execute()` call. `thread_*` columns count only the thread that runs the operator.

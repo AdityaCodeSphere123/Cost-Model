@@ -1,0 +1,191 @@
+==== Mon Nov  2 11:00:37 IST 2026  profile=default  configs=6
+os=Darwin 25.5.0  cpu=Apple M4 Pro
+openjdk version "17.0.20" 2026-07-21
+OpenJDK Runtime Environment Homebrew (build 17.0.20+0)
+OpenJDK 64-Bit Server VM Homebrew (build 17.0.20+0, mixed mode, sharing)
+SLF4J: Class path contains multiple SLF4J providers.
+SLF4J: Found provider [org.apache.logging.slf4j.SLF4JServiceProvider@18388a3c]
+SLF4J: Found provider [org.slf4j.simple.SimpleServiceProvider@1d035be3]
+SLF4J: See https://www.slf4j.org/codes.html#multiple_bindings for an explanation.
+SLF4J: Actual provider is of type [org.apache.logging.slf4j.SLF4JServiceProvider@18388a3c]
+[wayangprof] heap4g-G1-cpuall|sort|text|r100000|rr0|k1000|s-|w8  master=local[*]  spark=3.5.7  warmup=3 reps=7  os_probe=macos-proc_pid_rusage  measured=+SparkSortOperator
+[wayangprof]   pair 0 baseline  exec=    11.8ms cpu=    98.4ms task_cpu=    23.2ms shuffle=    0.0MB tasks=2 energy=0.166J out=100000
+[wayangprof]   pair 0 sort      exec=   192.1ms cpu=  1304.8ms task_cpu=   867.9ms shuffle=    6.6MB tasks=28 energy=1.513J out=100000
+[wayangprof]   pair 1 sort      exec=   198.1ms cpu=  1229.4ms task_cpu=   875.5ms shuffle=    6.6MB tasks=28 energy=1.416J out=100000
+[wayangprof]   pair 1 baseline  exec=    12.4ms cpu=    84.7ms task_cpu=    22.4ms shuffle=    0.0MB tasks=2 energy=0.130J out=100000
+[wayangprof]   pair 2 baseline  exec=    11.0ms cpu=    72.8ms task_cpu=    23.1ms shuffle=    0.0MB tasks=2 energy=0.120J out=100000
+[wayangprof]   pair 2 sort      exec=   188.6ms cpu=  1138.7ms task_cpu=   817.8ms shuffle=    6.6MB tasks=28 energy=1.198J out=100000
+[wayangprof]   pair 3 sort      exec=   186.7ms cpu=  1134.5ms task_cpu=   897.8ms shuffle=    6.6MB tasks=28 energy=1.153J out=100000
+[wayangprof]   pair 3 baseline  exec=    11.0ms cpu=    75.3ms task_cpu=    22.9ms shuffle=    0.0MB tasks=2 energy=0.143J out=100000
+[wayangprof]   pair 4 baseline  exec=    10.5ms cpu=    64.8ms task_cpu=    21.1ms shuffle=    0.0MB tasks=2 energy=0.121J out=100000
+[wayangprof]   pair 4 sort      exec=   178.4ms cpu=  1222.9ms task_cpu=   881.8ms shuffle=    6.6MB tasks=28 energy=1.330J out=100000
+[wayangprof]   pair 5 sort      exec=   189.3ms cpu=  1181.3ms task_cpu=   905.6ms shuffle=    6.6MB tasks=28 energy=1.450J out=100000
+[wayangprof]   pair 5 baseline  exec=    11.3ms cpu=    83.9ms task_cpu=    20.8ms shuffle=    0.0MB tasks=2 energy=0.246J out=100000
+[wayangprof]   pair 6 baseline  exec=    11.1ms cpu=    71.0ms task_cpu=    21.5ms shuffle=    0.0MB tasks=2 energy=0.120J out=100000
+[wayangprof]   pair 6 sort      exec=   186.3ms cpu=  1253.1ms task_cpu=   882.3ms shuffle=    6.6MB tasks=28 energy=1.345J out=100000
+SLF4J: Class path contains multiple SLF4J providers.
+SLF4J: Found provider [org.apache.logging.slf4j.SLF4JServiceProvider@18388a3c]
+SLF4J: Found provider [org.slf4j.simple.SimpleServiceProvider@1d035be3]
+SLF4J: See https://www.slf4j.org/codes.html#multiple_bindings for an explanation.
+SLF4J: Actual provider is of type [org.apache.logging.slf4j.SLF4JServiceProvider@18388a3c]
+[wayangprof] heap4g-G1-cpuall|sort|text|r1000000|rr0|k1000|s-|w8  master=local[*]  spark=3.5.7  warmup=3 reps=7  os_probe=macos-proc_pid_rusage  measured=+SparkSortOperator
+[wayangprof]   pair 0 baseline  exec=    79.6ms cpu=   329.9ms task_cpu=   190.3ms shuffle=    0.0MB tasks=3 energy=0.645J out=1000000
+[wayangprof]   pair 0 sort      exec=   867.6ms cpu=  4074.9ms task_cpu=  3553.0ms shuffle=   65.7MB tasks=30 energy=5.503J out=1000000
+[wayangprof]   pair 1 sort      exec=   861.0ms cpu=  3616.2ms task_cpu=  3275.1ms shuffle=   65.7MB tasks=30 energy=4.982J out=1000000
+[wayangprof]   pair 1 baseline  exec=    77.8ms cpu=   244.0ms task_cpu=   184.9ms shuffle=    0.0MB tasks=3 energy=0.467J out=1000000
+[wayangprof]   pair 2 baseline  exec=    77.2ms cpu=   236.1ms task_cpu=   184.7ms shuffle=    0.0MB tasks=3 energy=0.533J out=1000000
+[wayangprof]   pair 2 sort      exec=   812.7ms cpu=  3590.5ms task_cpu=  3253.3ms shuffle=   65.6MB tasks=30 energy=4.966J out=1000000
+[wayangprof]   pair 3 sort      exec=   819.9ms cpu=  3545.6ms task_cpu=  3218.8ms shuffle=   65.7MB tasks=30 energy=5.028J out=1000000
+[wayangprof]   pair 3 baseline  exec=    78.6ms cpu=   250.5ms task_cpu=   184.1ms shuffle=    0.0MB tasks=3 energy=0.486J out=1000000
+[wayangprof]   pair 4 baseline  exec=    78.2ms cpu=   226.3ms task_cpu=   183.5ms shuffle=    0.0MB tasks=3 energy=0.460J out=1000000
+[wayangprof]   pair 4 sort      exec=   819.0ms cpu=  3731.3ms task_cpu=  3281.9ms shuffle=   65.7MB tasks=30 energy=5.201J out=1000000
+[wayangprof]   pair 5 sort      exec=   829.4ms cpu=  3710.4ms task_cpu=  3229.1ms shuffle=   65.7MB tasks=30 energy=5.219J out=1000000
+[wayangprof]   pair 5 baseline  exec=    81.8ms cpu=   250.0ms task_cpu=   191.7ms shuffle=    0.0MB tasks=3 energy=0.496J out=1000000
+[wayangprof]   pair 6 baseline  exec=    77.9ms cpu=   266.1ms task_cpu=   182.8ms shuffle=    0.0MB tasks=3 energy=0.516J out=1000000
+[wayangprof]   pair 6 sort      exec=   810.8ms cpu=  3764.7ms task_cpu=  3429.1ms shuffle=   65.7MB tasks=30 energy=4.799J out=1000000
+SLF4J: Class path contains multiple SLF4J providers.
+SLF4J: Found provider [org.apache.logging.slf4j.SLF4JServiceProvider@127d7908]
+SLF4J: Found provider [org.slf4j.simple.SimpleServiceProvider@6b9c69a9]
+SLF4J: See https://www.slf4j.org/codes.html#multiple_bindings for an explanation.
+SLF4J: Actual provider is of type [org.apache.logging.slf4j.SLF4JServiceProvider@127d7908]
+[wayangprof] heap4g-G1-cpuall|join|text|r100000|rr100000|k100000|s-|w8  master=local[*]  spark=3.5.7  warmup=3 reps=7  os_probe=macos-proc_pid_rusage  measured=+SparkJoinOperator -SparkUnionAllOperator
+[wayangprof]   pair 0 baseline  exec=    13.7ms cpu=   153.4ms task_cpu=    47.2ms shuffle=    0.0MB tasks=4 energy=0.254J out=200000
+[wayangprof]   pair 0 join      exec=   204.2ms cpu=  1317.7ms task_cpu=  1024.2ms shuffle=   13.3MB tasks=28 energy=1.696J out=100087
+[wayangprof]   pair 1 join      exec=   180.5ms cpu=  1325.1ms task_cpu=  1014.1ms shuffle=   13.3MB tasks=28 energy=1.647J out=100087
+[wayangprof]   pair 1 baseline  exec=    11.2ms cpu=   134.9ms task_cpu=    48.2ms shuffle=    0.0MB tasks=4 energy=0.323J out=200000
+[wayangprof]   pair 2 baseline  exec=    11.3ms cpu=   112.2ms task_cpu=    45.8ms shuffle=    0.0MB tasks=4 energy=0.274J out=200000
+[wayangprof]   pair 2 join      exec=   174.1ms cpu=  1263.8ms task_cpu=  1049.0ms shuffle=   13.3MB tasks=28 energy=1.483J out=100087
+[wayangprof]   pair 3 join      exec=   169.0ms cpu=  1358.9ms task_cpu=  1024.4ms shuffle=   13.3MB tasks=28 energy=1.742J out=100087
+[wayangprof]   pair 3 baseline  exec=    11.3ms cpu=   132.4ms task_cpu=    46.6ms shuffle=    0.0MB tasks=4 energy=0.245J out=200000
+[wayangprof]   pair 4 baseline  exec=    11.3ms cpu=   158.8ms task_cpu=    48.2ms shuffle=    0.0MB tasks=4 energy=0.439J out=200000
+[wayangprof]   pair 4 join      exec=   169.1ms cpu=  1287.8ms task_cpu=  1002.8ms shuffle=   13.3MB tasks=28 energy=1.555J out=100087
+[wayangprof]   pair 5 join      exec=   166.7ms cpu=  1211.3ms task_cpu=  1053.6ms shuffle=   13.3MB tasks=28 energy=1.366J out=100087
+[wayangprof]   pair 5 baseline  exec=    10.7ms cpu=   118.2ms task_cpu=    42.4ms shuffle=    0.0MB tasks=4 energy=0.216J out=200000
+[wayangprof]   pair 6 baseline  exec=    10.7ms cpu=   109.6ms task_cpu=    42.9ms shuffle=    0.0MB tasks=4 energy=0.196J out=200000
+[wayangprof]   pair 6 join      exec=   160.8ms cpu=  1255.3ms task_cpu=  1076.5ms shuffle=   13.3MB tasks=28 energy=1.440J out=100087
+SLF4J: Class path contains multiple SLF4J providers.
+SLF4J: Found provider [org.apache.logging.slf4j.SLF4JServiceProvider@127d7908]
+SLF4J: Found provider [org.slf4j.simple.SimpleServiceProvider@6b9c69a9]
+SLF4J: See https://www.slf4j.org/codes.html#multiple_bindings for an explanation.
+SLF4J: Actual provider is of type [org.apache.logging.slf4j.SLF4JServiceProvider@127d7908]
+[wayangprof] heap4g-G1-cpuall|join|text|r100000|rr100000|k10000|s-|w8  master=local[*]  spark=3.5.7  warmup=3 reps=7  os_probe=macos-proc_pid_rusage  measured=+SparkJoinOperator -SparkUnionAllOperator
+[wayangprof]   pair 0 baseline  exec=    12.0ms cpu=   134.6ms task_cpu=    48.2ms shuffle=    0.0MB tasks=4 energy=0.229J out=200000
+[wayangprof]   pair 0 join      exec=   208.2ms cpu=  1438.4ms task_cpu=  1124.9ms shuffle=   13.2MB tasks=28 energy=1.736J out=1000403
+[wayangprof]   pair 1 join      exec=   184.3ms cpu=  1472.6ms task_cpu=  1181.1ms shuffle=   13.2MB tasks=28 energy=1.649J out=1000403
+[wayangprof]   pair 1 baseline  exec=    12.7ms cpu=   154.7ms task_cpu=    51.3ms shuffle=    0.0MB tasks=4 energy=0.362J out=200000
+[wayangprof]   pair 2 baseline  exec=    11.9ms cpu=   126.7ms task_cpu=    48.9ms shuffle=    0.0MB tasks=4 energy=0.249J out=200000
+[wayangprof]   pair 2 join      exec=   192.9ms cpu=  1462.1ms task_cpu=  1156.2ms shuffle=   13.2MB tasks=28 energy=1.663J out=1000403
+[wayangprof]   pair 3 join      exec=   187.6ms cpu=  1541.9ms task_cpu=  1217.3ms shuffle=   13.2MB tasks=28 energy=1.683J out=1000403
+[wayangprof]   pair 3 baseline  exec=    10.7ms cpu=   114.3ms task_cpu=    42.1ms shuffle=    0.0MB tasks=4 energy=0.239J out=200000
+[wayangprof]   pair 4 baseline  exec=    10.6ms cpu=   128.8ms task_cpu=    41.8ms shuffle=    0.0MB tasks=4 energy=0.313J out=200000
+[wayangprof]   pair 4 join      exec=   189.8ms cpu=  1442.3ms task_cpu=  1218.4ms shuffle=   13.2MB tasks=28 energy=1.501J out=1000403
+[wayangprof]   pair 5 join      exec=   188.1ms cpu=  1370.3ms task_cpu=  1214.0ms shuffle=   13.2MB tasks=28 energy=1.430J out=1000403
+[wayangprof]   pair 5 baseline  exec=    10.4ms cpu=   126.0ms task_cpu=    41.5ms shuffle=    0.0MB tasks=4 energy=0.216J out=200000
+[wayangprof]   pair 6 baseline  exec=    10.6ms cpu=   109.6ms task_cpu=    42.4ms shuffle=    0.0MB tasks=4 energy=0.190J out=200000
+[wayangprof]   pair 6 join      exec=   190.3ms cpu=  1410.9ms task_cpu=  1140.1ms shuffle=   13.2MB tasks=28 energy=1.607J out=1000403
+SLF4J: Class path contains multiple SLF4J providers.
+SLF4J: Found provider [org.apache.logging.slf4j.SLF4JServiceProvider@127d7908]
+SLF4J: Found provider [org.slf4j.simple.SimpleServiceProvider@6b9c69a9]
+SLF4J: See https://www.slf4j.org/codes.html#multiple_bindings for an explanation.
+SLF4J: Actual provider is of type [org.apache.logging.slf4j.SLF4JServiceProvider@127d7908]
+[wayangprof] heap4g-G1-cpuall|join|text|r1000000|rr1000000|k1000000|s-|w8  master=local[*]  spark=3.5.7  warmup=3 reps=7  os_probe=macos-proc_pid_rusage  measured=+SparkJoinOperator -SparkUnionAllOperator
+[wayangprof]   pair 0 baseline  exec=    77.1ms cpu=   463.5ms task_cpu=   379.7ms shuffle=    0.0MB tasks=6 energy=0.936J out=2000000
+[wayangprof]   pair 0 join      exec=   857.8ms cpu=  5824.4ms task_cpu=  5210.6ms shuffle=  134.3MB tasks=30 energy=7.625J out=1001767
+[wayangprof]   pair 1 join      exec=   840.3ms cpu=  5564.5ms task_cpu=  4974.6ms shuffle=  134.3MB tasks=30 energy=7.634J out=1001767
+[wayangprof]   pair 1 baseline  exec=    78.1ms cpu=   533.8ms task_cpu=   374.4ms shuffle=    0.0MB tasks=6 energy=1.077J out=2000000
+[wayangprof]   pair 2 baseline  exec=    76.1ms cpu=   453.0ms task_cpu=   372.6ms shuffle=    0.0MB tasks=6 energy=0.924J out=2000000
+[wayangprof]   pair 2 join      exec=   831.9ms cpu=  5894.7ms task_cpu=  5326.3ms shuffle=  134.3MB tasks=30 energy=7.345J out=1001767
+[wayangprof]   pair 3 join      exec=   884.8ms cpu=  5968.5ms task_cpu=  5289.7ms shuffle=  134.3MB tasks=30 energy=7.510J out=1001767
+[wayangprof]   pair 3 baseline  exec=    78.5ms cpu=   462.3ms task_cpu=   376.6ms shuffle=    0.0MB tasks=6 energy=0.889J out=2000000
+[wayangprof]   pair 4 baseline  exec=    88.6ms cpu=   480.5ms task_cpu=   384.5ms shuffle=    0.0MB tasks=6 energy=0.943J out=2000000
+[wayangprof]   pair 4 join      exec=   796.8ms cpu=  5824.0ms task_cpu=  5123.5ms shuffle=  134.3MB tasks=30 energy=7.810J out=1001767
+[wayangprof]   pair 5 join      exec=   796.0ms cpu=  5592.6ms task_cpu=  5057.4ms shuffle=  134.3MB tasks=30 energy=7.744J out=1001767
+[wayangprof]   pair 5 baseline  exec=    77.0ms cpu=   454.3ms task_cpu=   373.3ms shuffle=    0.0MB tasks=6 energy=0.913J out=2000000
+[wayangprof]   pair 6 baseline  exec=    76.7ms cpu=   451.3ms task_cpu=   371.0ms shuffle=    0.0MB tasks=6 energy=0.927J out=2000000
+[wayangprof]   pair 6 join      exec=   779.1ms cpu=  5759.8ms task_cpu=  5107.6ms shuffle=  134.3MB tasks=30 energy=7.905J out=1001767
+SLF4J: Class path contains multiple SLF4J providers.
+SLF4J: Found provider [org.apache.logging.slf4j.SLF4JServiceProvider@127d7908]
+SLF4J: Found provider [org.slf4j.simple.SimpleServiceProvider@6b9c69a9]
+SLF4J: See https://www.slf4j.org/codes.html#multiple_bindings for an explanation.
+SLF4J: Actual provider is of type [org.apache.logging.slf4j.SLF4JServiceProvider@127d7908]
+[wayangprof] heap4g-G1-cpuall|join|text|r1000000|rr1000000|k100000|s-|w8  master=local[*]  spark=3.5.7  warmup=3 reps=7  os_probe=macos-proc_pid_rusage  measured=+SparkJoinOperator -SparkUnionAllOperator
+[wayangprof]   pair 0 baseline  exec=    77.2ms cpu=   470.7ms task_cpu=   379.9ms shuffle=    0.0MB tasks=6 energy=0.943J out=2000000
+[wayangprof]   pair 0 join      exec=   835.4ms cpu=  6042.8ms task_cpu=  5475.0ms shuffle=  132.5MB tasks=30 energy=8.089J out=10002311
+[wayangprof]   pair 1 join      exec=   945.8ms cpu=  6454.1ms task_cpu=  5863.2ms shuffle=  132.5MB tasks=30 energy=7.333J out=10002311
+[wayangprof]   pair 1 baseline  exec=    89.1ms cpu=   558.9ms task_cpu=   399.6ms shuffle=    0.0MB tasks=6 energy=1.043J out=2000000
+[wayangprof]   pair 2 baseline  exec=    75.3ms cpu=   442.2ms task_cpu=   364.1ms shuffle=    0.0MB tasks=6 energy=0.918J out=2000000
+[wayangprof]   pair 2 join      exec=   877.3ms cpu=  6000.5ms task_cpu=  5325.6ms shuffle=  132.5MB tasks=30 energy=8.246J out=10002311
+[wayangprof]   pair 3 join      exec=   884.8ms cpu=  6291.5ms task_cpu=  5470.9ms shuffle=  132.5MB tasks=30 energy=8.348J out=10002311
+[wayangprof]   pair 3 baseline  exec=    77.3ms cpu=   436.1ms task_cpu=   369.8ms shuffle=    0.0MB tasks=6 energy=0.874J out=2000000
+[wayangprof]   pair 4 baseline  exec=    86.2ms cpu=   515.2ms task_cpu=   376.0ms shuffle=    0.0MB tasks=6 energy=1.015J out=2000000
+[wayangprof]   pair 4 join      exec=   949.5ms cpu=  5852.2ms task_cpu=  5333.5ms shuffle=  132.5MB tasks=30 energy=7.924J out=10002311
+[wayangprof]   pair 5 join      exec=   961.1ms cpu=  5890.7ms task_cpu=  5378.6ms shuffle=  132.5MB tasks=30 energy=7.902J out=10002311
+[wayangprof]   pair 5 baseline  exec=    76.3ms cpu=   465.7ms task_cpu=   370.6ms shuffle=    0.0MB tasks=6 energy=0.922J out=2000000
+[wayangprof]   pair 6 baseline  exec=    77.9ms cpu=   458.2ms task_cpu=   371.0ms shuffle=    0.0MB tasks=6 energy=0.937J out=2000000
+[wayangprof]   pair 6 join      exec=   952.0ms cpu=  6000.7ms task_cpu=  5460.9ms shuffle=  132.5MB tasks=30 energy=7.847J out=10002311
+==== Mon Nov  2 11:02:09 IST 2026  profile=default  configs=3
+os=Darwin 25.5.0  cpu=Apple M4 Pro
+openjdk version "17.0.20" 2026-07-21
+OpenJDK Runtime Environment Homebrew (build 17.0.20+0)
+OpenJDK 64-Bit Server VM Homebrew (build 17.0.20+0, mixed mode, sharing)
+SLF4J: Class path contains multiple SLF4J providers.
+SLF4J: Found provider [org.apache.logging.slf4j.SLF4JServiceProvider@2234078]
+SLF4J: Found provider [org.slf4j.simple.SimpleServiceProvider@5ec77191]
+SLF4J: See https://www.slf4j.org/codes.html#multiple_bindings for an explanation.
+SLF4J: Actual provider is of type [org.apache.logging.slf4j.SLF4JServiceProvider@2234078]
+[wayangprof] heap1g-Serial-cpu2|sort|text|r100000|rr0|k1000|s-|w8  master=local[2]  spark=3.5.7  warmup=3 reps=7  os_probe=macos-proc_pid_rusage  measured=+SparkSortOperator
+[wayangprof]   pair 0 baseline  exec=    11.7ms cpu=    99.3ms task_cpu=    22.7ms shuffle=    0.0MB tasks=2 energy=0.263J out=100000
+[wayangprof]   pair 0 sort      exec=   179.8ms cpu=   627.6ms task_cpu=   299.5ms shuffle=    6.6MB tasks=8 energy=1.106J out=100000
+[wayangprof]   pair 1 sort      exec=   177.1ms cpu=   537.3ms task_cpu=   311.8ms shuffle=    6.6MB tasks=8 energy=0.958J out=100000
+[wayangprof]   pair 1 baseline  exec=    10.5ms cpu=    90.9ms task_cpu=    22.0ms shuffle=    0.0MB tasks=2 energy=0.158J out=100000
+[wayangprof]   pair 2 baseline  exec=    10.4ms cpu=    92.2ms task_cpu=    21.3ms shuffle=    0.0MB tasks=2 energy=0.230J out=100000
+[wayangprof]   pair 2 sort      exec=   162.7ms cpu=   470.4ms task_cpu=   291.6ms shuffle=    6.6MB tasks=8 energy=0.792J out=100000
+[wayangprof]   pair 3 sort      exec=   160.0ms cpu=   441.5ms task_cpu=   285.3ms shuffle=    6.6MB tasks=8 energy=0.753J out=100000
+[wayangprof]   pair 3 baseline  exec=    10.2ms cpu=    91.8ms task_cpu=    21.4ms shuffle=    0.0MB tasks=2 energy=0.130J out=100000
+[wayangprof]   pair 4 baseline  exec=    10.7ms cpu=    70.2ms task_cpu=    22.1ms shuffle=    0.0MB tasks=2 energy=0.118J out=100000
+[wayangprof]   pair 4 sort      exec=   172.5ms cpu=   459.8ms task_cpu=   304.1ms shuffle=    6.6MB tasks=8 energy=0.753J out=100000
+[wayangprof]   pair 5 sort      exec=   167.3ms cpu=   509.7ms task_cpu=   302.0ms shuffle=    6.6MB tasks=8 energy=0.884J out=100000
+[wayangprof]   pair 5 baseline  exec=    10.8ms cpu=    76.1ms task_cpu=    22.0ms shuffle=    0.0MB tasks=2 energy=0.128J out=100000
+[wayangprof]   pair 6 baseline  exec=    11.0ms cpu=    65.4ms task_cpu=    22.7ms shuffle=    0.0MB tasks=2 energy=0.205J out=100000
+[wayangprof]   pair 6 sort      exec=   163.9ms cpu=   409.4ms task_cpu=   288.7ms shuffle=    6.6MB tasks=8 energy=0.690J out=100000
+[wayangprof] added columns to raw.csv: [pool_eden_space_peak_bytes, pool_survivor_space_peak_bytes, pool_tenured_gen_peak_bytes, gc_copy_count, gc_copy_ms, gc_marksweepcompact_count, gc_marksweepcompact_ms]
+SLF4J: Class path contains multiple SLF4J providers.
+SLF4J: Found provider [org.apache.logging.slf4j.SLF4JServiceProvider@3aefae67]
+SLF4J: Found provider [org.slf4j.simple.SimpleServiceProvider@2e1792e7]
+SLF4J: See https://www.slf4j.org/codes.html#multiple_bindings for an explanation.
+SLF4J: Actual provider is of type [org.apache.logging.slf4j.SLF4JServiceProvider@3aefae67]
+[wayangprof] heap1g-Serial-cpu2|join|text|r100000|rr100000|k100000|s-|w8  master=local[2]  spark=3.5.7  warmup=3 reps=7  os_probe=macos-proc_pid_rusage  measured=+SparkJoinOperator -SparkUnionAllOperator
+[wayangprof]   pair 0 baseline  exec=    30.3ms cpu=   171.9ms task_cpu=    56.9ms shuffle=    0.0MB tasks=4 energy=0.251J out=200000
+[wayangprof]   pair 0 join      exec=   255.1ms cpu=   641.4ms task_cpu=   456.7ms shuffle=   13.3MB tasks=8 energy=1.088J out=100087
+[wayangprof]   pair 1 join      exec=   254.3ms cpu=   660.3ms task_cpu=   458.9ms shuffle=   13.3MB tasks=8 energy=1.104J out=100087
+[wayangprof]   pair 1 baseline  exec=    32.0ms cpu=   174.9ms task_cpu=    60.5ms shuffle=    0.0MB tasks=4 energy=0.369J out=200000
+[wayangprof]   pair 2 baseline  exec=    26.8ms cpu=   132.9ms task_cpu=    50.4ms shuffle=    0.0MB tasks=4 energy=0.207J out=200000
+[wayangprof]   pair 2 join      exec=   267.1ms cpu=   620.1ms task_cpu=   471.4ms shuffle=   13.3MB tasks=8 energy=0.972J out=100087
+[wayangprof]   pair 3 join      exec=   251.3ms cpu=   604.3ms task_cpu=   454.6ms shuffle=   13.3MB tasks=8 energy=1.017J out=100087
+[wayangprof]   pair 3 baseline  exec=    29.3ms cpu=   134.6ms task_cpu=    57.4ms shuffle=    0.0MB tasks=4 energy=0.195J out=200000
+[wayangprof]   pair 4 baseline  exec=    33.6ms cpu=   151.3ms task_cpu=    64.8ms shuffle=    0.0MB tasks=4 energy=0.231J out=200000
+[wayangprof]   pair 4 join      exec=   259.0ms cpu=   675.2ms task_cpu=   463.1ms shuffle=   13.3MB tasks=8 energy=1.119J out=100087
+[wayangprof]   pair 5 join      exec=   252.1ms cpu=   737.7ms task_cpu=   448.8ms shuffle=   13.3MB tasks=8 energy=1.257J out=100087
+[wayangprof]   pair 5 baseline  exec=    25.4ms cpu=   110.3ms task_cpu=    48.5ms shuffle=    0.0MB tasks=4 energy=0.180J out=200000
+[wayangprof]   pair 6 baseline  exec=    34.6ms cpu=   184.1ms task_cpu=    65.7ms shuffle=    0.0MB tasks=4 energy=0.281J out=200000
+[wayangprof]   pair 6 join      exec=   258.1ms cpu=   622.0ms task_cpu=   460.8ms shuffle=   13.3MB tasks=8 energy=1.013J out=100087
+SLF4J: Class path contains multiple SLF4J providers.
+SLF4J: Found provider [org.apache.logging.slf4j.SLF4JServiceProvider@3aefae67]
+SLF4J: Found provider [org.slf4j.simple.SimpleServiceProvider@2e1792e7]
+SLF4J: See https://www.slf4j.org/codes.html#multiple_bindings for an explanation.
+SLF4J: Actual provider is of type [org.apache.logging.slf4j.SLF4JServiceProvider@3aefae67]
+[wayangprof] heap1g-Serial-cpu2|join|text|r100000|rr100000|k10000|s-|w8  master=local[2]  spark=3.5.7  warmup=3 reps=7  os_probe=macos-proc_pid_rusage  measured=+SparkJoinOperator -SparkUnionAllOperator
+[wayangprof]   pair 0 baseline  exec=    27.5ms cpu=   172.5ms task_cpu=    50.6ms shuffle=    0.0MB tasks=4 energy=0.284J out=200000
+[wayangprof]   pair 0 join      exec=   272.0ms cpu=   687.7ms task_cpu=   487.8ms shuffle=   13.2MB tasks=8 energy=1.130J out=1000403
+[wayangprof]   pair 1 join      exec=   268.9ms cpu=   690.5ms task_cpu=   490.8ms shuffle=   13.2MB tasks=8 energy=1.160J out=1000403
+[wayangprof]   pair 1 baseline  exec=    28.2ms cpu=   183.1ms task_cpu=    53.8ms shuffle=    0.0MB tasks=4 energy=0.394J out=200000
+[wayangprof]   pair 2 baseline  exec=    33.1ms cpu=   153.0ms task_cpu=    62.3ms shuffle=    0.0MB tasks=4 energy=0.239J out=200000
+[wayangprof]   pair 2 join      exec=   269.1ms cpu=   649.8ms task_cpu=   489.5ms shuffle=   13.2MB tasks=8 energy=1.096J out=1000403
+[wayangprof]   pair 3 join      exec=   261.2ms cpu=   642.1ms task_cpu=   477.9ms shuffle=   13.2MB tasks=8 energy=1.094J out=1000403
+[wayangprof]   pair 3 baseline  exec=    32.4ms cpu=   144.8ms task_cpu=    62.2ms shuffle=    0.0MB tasks=4 energy=0.226J out=200000
+[wayangprof]   pair 4 baseline  exec=    25.3ms cpu=   138.2ms task_cpu=    46.9ms shuffle=    0.0MB tasks=4 energy=0.326J out=200000
+[wayangprof]   pair 4 join      exec=   262.3ms cpu=   617.1ms task_cpu=   478.2ms shuffle=   13.2MB tasks=8 energy=1.065J out=1000403
+[wayangprof]   pair 5 join      exec=   267.5ms cpu=   642.9ms task_cpu=   480.1ms shuffle=   13.2MB tasks=8 energy=1.095J out=1000403
+[wayangprof]   pair 5 baseline  exec=    27.6ms cpu=   141.0ms task_cpu=    52.5ms shuffle=    0.0MB tasks=4 energy=0.229J out=200000
+[wayangprof]   pair 6 baseline  exec=    31.4ms cpu=   138.0ms task_cpu=    59.0ms shuffle=    0.0MB tasks=4 energy=0.209J out=200000
+[wayangprof]   pair 6 join      exec=   263.1ms cpu=   613.8ms task_cpu=   477.0ms shuffle=   13.2MB tasks=8 energy=1.039J out=1000403

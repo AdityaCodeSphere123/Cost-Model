@@ -27,6 +27,11 @@ import org.apache.wayang.core.api.Configuration;
 import org.apache.wayang.core.api.Job;
 import org.apache.wayang.core.api.WayangContext;
 import org.apache.wayang.core.optimizer.OptimizationContext;
+import org.apache.wayang.core.optimizer.ProbabilisticDoubleInterval;
+import org.apache.wayang.core.optimizer.cardinality.CardinalityEstimate;
+import org.apache.wayang.core.optimizer.costs.LoadEstimate;
+import org.apache.wayang.core.optimizer.costs.LoadProfile;
+import org.apache.wayang.core.optimizer.costs.TimeEstimate;
 import org.apache.wayang.core.plan.executionplan.ExecutionPlan;
 import org.apache.wayang.core.plan.executionplan.ExecutionTask;
 import org.apache.wayang.core.plan.wayangplan.ExecutionOperator;
@@ -81,6 +86,7 @@ import java.util.Set;
 import java.util.TreeMap;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
+import java.util.function.Function;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
 
@@ -106,6 +112,9 @@ import java.util.stream.Stream;
  *   <li>Besides JVM and OS counters, a SparkListener sums Spark's own task metrics (executor CPU, shuffle
  *       bytes, spill, peak execution memory, ...) over all tasks of the run.</li>
  * </ul>
+ *
+ * <p>Wayang's own estimates for the same plan (CPU cycles, disk, network, RAM, time, cost) are stored next
+ * to the measurements in separate {@code wayang_est_*} columns, see {@link #planInfo}.
  */
 public final class SparkOperatorProfiler {
 
@@ -663,6 +672,7 @@ public final class SparkOperatorProfiler {
         String coldCmd = null;
         String resource = "default";
         String tag = "";
+        boolean estimateOnly = false;    // only write Wayang's estimates for both plans to --out, run nothing
 
         boolean binary() {
             return BINARY.contains(this.op);
@@ -706,6 +716,7 @@ public final class SparkOperatorProfiler {
                 case "--cold-cmd": c.coldCmd = v; i++; break;
                 case "--resource": c.resource = v; i++; break;
                 case "--tag": c.tag = v; i++; break;
+                case "--estimate-only": c.estimateOnly = true; break;
                 case "-h": case "--help": usage(); System.exit(0); break;
                 default: System.err.println("Unknown argument: " + a); usage(); System.exit(2);
             }
@@ -733,6 +744,7 @@ public final class SparkOperatorProfiler {
                 + "         [--keys K] [--sel S] [--words W] [--warmup N] [--reps N] [--cores N|all] [--data-dir D]\n"
                 + "         [--out raw.csv] [--tmp-dir D] [--pidrusage path] [--cold-cmd \"sudo -n purge\"]\n"
                 + "         [--resource label] [--tag t]\n"
+                + "         [--estimate-only]   (write only Wayang's estimates for the baseline and operator plan to --out)\n"
                 + "Operators: " + NAMES.keySet());
     }
 
@@ -863,17 +875,153 @@ public final class SparkOperatorProfiler {
         return List.of(new WayangPlan(sink));
     }
 
-    /** The execution operators Wayang picks for a plan (including channel conversions), as a count map. */
-    static Map<String, Integer> executionOperators(WayangContext ctx, List<WayangPlan> plans) {
-        Map<String, Integer> m = new TreeMap<>();
+    // ------------------------------------------------------------------------------------------
+    // Wayang's own estimates
+    // ------------------------------------------------------------------------------------------
+
+    /** What Wayang's optimizer picks for a plan and what it predicts the plan will cost. */
+    static final class PlanInfo {
+        /** Execution operators Wayang picks (including channel conversions), as a count map. */
+        final Map<String, Integer> ops = new TreeMap<>();
+        /** wayang_est_* columns; empty if Wayang could not estimate every task. */
+        final Map<String, Object> est = new LinkedHashMap<>();
+    }
+
+    /**
+     * Optimizes every job of the plan the way Wayang does before running it, and reads the estimates the
+     * optimizer stored for each execution task (regular operators and channel conversions alike):
+     * <ul>
+     *   <li>load profile: CPU cycles, disk bytes, network bytes, RAM bytes (each a lower..upper interval;
+     *       a UDF's nested profile is added to its operator, as Wayang's time converter does), fixed overhead;</li>
+     *   <li>the time (ms) and cost Wayang derives from it with the platform's converters;</li>
+     *   <li>the estimated number of rows that reach the sink(s).</li>
+     * </ul>
+     * Values are summed over all tasks and jobs, like the measured columns cover the whole run, so
+     * (operator plan - baseline plan) is Wayang's estimate of the operator. Platform start-up time is kept
+     * apart in wayang_est_startup_ms. Each profiler plan runs on one platform, so there is only one possible
+     * execution plan, and the pick (scalar or vector cost model) cannot change these numbers.
+     */
+    static PlanInfo planInfo(WayangContext ctx, List<WayangPlan> plans) {
+        PlanInfo info = new PlanInfo();
+        long[] cpu = new long[2], disk = new long[2], net = new long[2], ram = new long[2], sinkRows = new long[2];
+        long overheadMs = 0, startupMs = 0;
+        int tasks = 0;
+        TimeEstimate time = TimeEstimate.ZERO;
+        ProbabilisticDoubleInterval cost = new ProbabilisticDoubleInterval(0d, 0d, 1d);
+        List<String> breakdown = new ArrayList<>();
+        boolean ok = true;
         for (WayangPlan plan : plans) {
             try {
-                ExecutionPlan ep = ctx.buildInitialExecutionPlan("explain", plan);
-                for (ExecutionTask t : ep.collectAllTasks()) m.merge(t.getOperator().getClass().getSimpleName(), 1, Integer::sum);
+                Job job = ctx.createJob("explain", plan);
+                ExecutionPlan ep = job.buildInitialExecutionPlan();
+                OptimizationContext oc = job.getOptimizationContext();
+                Set<org.apache.wayang.core.platform.Platform> platforms = new HashSet<>();
+                for (ExecutionTask t : ep.collectAllTasks()) {
+                    ExecutionOperator op = t.getOperator();
+                    String name = op.getClass().getSimpleName();
+                    info.ops.merge(name, 1, Integer::sum);
+                    OptimizationContext.OperatorContext opCtx = oc == null ? null : oc.getOperatorContext(op);
+                    LoadProfile lp = opCtx == null ? null : opCtx.getLoadProfile();
+                    if (lp == null) {
+                        System.err.println("[wayangprof] Wayang has no estimate for " + name);
+                        ok = false;
+                        continue;
+                    }
+                    platforms.add(op.getPlatform());
+                    tasks++;
+                    long[] c = loadOf(lp, LoadProfile::getCpuUsage), d = loadOf(lp, LoadProfile::getDiskUsage),
+                            n = loadOf(lp, LoadProfile::getNetworkUsage), r = loadOf(lp, LoadProfile::getRamUsage);
+                    addTo(cpu, c);
+                    addTo(disk, d);
+                    addTo(net, n);
+                    addTo(ram, r);
+                    overheadMs += lp.getOverheadMillis();
+                    TimeEstimate te = opCtx.getTimeEstimate();
+                    time = time.plus(te);
+                    cost = cost.plus(opCtx.getCostEstimate());
+                    if (op.isSink() && op.getNumInputs() > 0 && opCtx.getInputCardinality(0) != null) {
+                        sinkRows[0] += opCtx.getInputCardinality(0).getLowerEstimate();
+                        sinkRows[1] += opCtx.getInputCardinality(0).getUpperEstimate();
+                    }
+                    breakdown.add(String.format("%s in=%s out=%s cpu=%s disk=%s net=%s ms=%s", name,
+                            cards(opCtx.getInputCardinalities()), cards(opCtx.getOutputCardinalities()),
+                            range(c[0], c[1]), range(d[0], d[1]), range(n[0], n[1]),
+                            range(te.getLowerEstimate(), te.getUpperEstimate())));
+                }
+                for (org.apache.wayang.core.platform.Platform p : platforms) {
+                    startupMs += job.getConfiguration().getPlatformStartUpTimeProvider().provideFor(p);
+                }
             } catch (Exception e) {
-                System.err.println("[wayangprof] could not read the execution plan: " + e);
+                System.err.println("[wayangprof] could not read the execution plan or its estimates: " + e);
+                ok = false;
             }
         }
+        if (!ok) return info; // no partial sums: they would look like a cheaper plan
+        Map<String, Object> m = info.est;
+        m.put("wayang_est_tasks", tasks);
+        m.put("wayang_est_cpu_cycles_lower", cpu[0]);
+        m.put("wayang_est_cpu_cycles_upper", cpu[1]);
+        m.put("wayang_est_disk_bytes_lower", disk[0]);
+        m.put("wayang_est_disk_bytes_upper", disk[1]);
+        m.put("wayang_est_network_bytes_lower", net[0]);
+        m.put("wayang_est_network_bytes_upper", net[1]);
+        m.put("wayang_est_ram_bytes_lower", ram[0]);
+        m.put("wayang_est_ram_bytes_upper", ram[1]);
+        m.put("wayang_est_overhead_ms", overheadMs);
+        m.put("wayang_est_time_ms_lower", time.getLowerEstimate());
+        m.put("wayang_est_time_ms_upper", time.getUpperEstimate());
+        m.put("wayang_est_time_ms_gmean", time.getGeometricMeanEstimate());
+        m.put("wayang_est_time_prob", time.getCorrectnessProbability());
+        m.put("wayang_est_cost_lower", cost.getLowerEstimate());
+        m.put("wayang_est_cost_upper", cost.getUpperEstimate());
+        m.put("wayang_est_startup_ms", startupMs);
+        m.put("wayang_est_out_rows_lower", sinkRows[0]);
+        m.put("wayang_est_out_rows_upper", sinkRows[1]);
+        breakdown.sort(null); // tasks come from a set; sort for a stable text
+        m.put("wayang_est_breakdown", String.join(" | ", breakdown));
+        return info;
+    }
+
+    /** One resource of a load profile plus its nested (UDF) profiles, as {lower, upper}. */
+    static long[] loadOf(LoadProfile lp, Function<LoadProfile, LoadEstimate> resource) {
+        long[] sum = new long[2];
+        List<LoadProfile> all = new ArrayList<>();
+        all.add(lp);
+        all.addAll(lp.getSubprofiles());
+        for (LoadProfile p : all) {
+            LoadEstimate e = resource.apply(p);
+            if (e == null) continue;
+            sum[0] += e.getLowerEstimate();
+            sum[1] += e.getUpperEstimate();
+        }
+        return sum;
+    }
+
+    static void addTo(long[] acc, long[] v) {
+        acc[0] += v[0];
+        acc[1] += v[1];
+    }
+
+    static String range(long lo, long hi) {
+        return lo == hi ? Long.toString(lo) : lo + ".." + hi;
+    }
+
+    static String cards(CardinalityEstimate[] cs) {
+        if (cs == null || cs.length == 0) return "-";
+        return Arrays.stream(cs).map(e -> e == null ? "?" : range(e.getLowerEstimate(), e.getUpperEstimate()))
+                .collect(Collectors.joining("+"));
+    }
+
+    /** Wayang settings that turn a load profile into time, so the estimates can be reproduced. */
+    static Map<String, Object> wayangSettings(Configuration conf) {
+        Map<String, Object> m = new LinkedHashMap<>();
+        m.put("wayang_cpu_mhz", conf.getLongProperty("wayang.spark.cpu.mhz"));
+        // Wayang divides CPU cycles by machines x cores-per-machine (set to the task threads in main).
+        m.put("wayang_cores", conf.getLongProperty("wayang.spark.machines") * conf.getLongProperty("wayang.spark.cores-per-machine"));
+        m.put("wayang_disk_ms_per_mb", conf.getDoubleProperty("wayang.spark.hdfs.ms-per-mb"));
+        m.put("wayang_network_ms_per_mb", conf.getDoubleProperty("wayang.spark.network.ms-per-mb"));
+        m.put("wayang_cost_per_ms", conf.getDoubleProperty("wayang.spark.costs.per-ms"));
+        m.put("wayang_cost_model", conf.getOptionalStringProperty("wayang.core.optimizer.cost.model").orElse("default"));
         return m;
     }
 
@@ -1122,6 +1270,35 @@ public final class SparkOperatorProfiler {
         Files.createDirectories(c.tmpDir);
         Path sinkDir = c.tmpDir.resolve("wayangprof-sink-" + ProcessHandle.current().pid());
 
+        // Which Spark operators each plan really runs, and what Wayang estimates each plan costs.
+        // Only the optimizer runs here; it does not need the SparkContext.
+        PlanInfo baseInfo = planInfo(ctx, buildPlans(c, in, true, sinkDir));
+        PlanInfo opInfo = planInfo(ctx, buildPlans(c, in, false, sinkDir));
+        Map<String, Integer> baseOps = baseInfo.ops;
+        Map<String, Integer> opOps = opInfo.ops;
+        Map<String, Object> wayangEnv = wayangSettings(conf);
+        if (baseInfo.est.isEmpty() || opInfo.est.isEmpty()) {
+            System.err.println("[wayangprof] WARNING: no Wayang estimates for " + c.configId() + "; wayang_est_* stay empty");
+        }
+        if (c.estimateOnly) {
+            List<Map<String, Object>> rows = new ArrayList<>();
+            for (boolean baseline : new boolean[]{true, false}) {
+                PlanInfo pi = baseline ? baseInfo : opInfo;
+                if (pi.est.isEmpty()) continue;
+                Map<String, Object> row = new LinkedHashMap<>();
+                row.put("config_id", c.configId());
+                row.put("plan", baseline ? "baseline" : "operator");
+                row.put("plan_execution_operators", joinCounts(pi.ops));
+                row.putAll(pi.est);
+                row.putAll(wayangEnv);
+                rows.add(row);
+            }
+            appendCsv(c.out, rows);
+            System.err.printf("[wayangprof] %s  Wayang estimate: baseline %s ms, operator %s ms%n", c.configId(),
+                    baseInfo.est.get("wayang_est_time_ms_gmean"), opInfo.est.get("wayang_est_time_ms_gmean"));
+            System.exit(rows.size() == 2 ? 0 : 1);
+        }
+
         // Start Spark once and hold a reference, so Wayang does not close it after every job.
         Job pin = ctx.createJob("wayangprof-start", buildPlans(c, in, true, sinkDir).get(0));
         SparkContextReference sparkRef = SparkPlatform.getInstance().getSparkContext(pin);
@@ -1139,9 +1316,6 @@ public final class SparkOperatorProfiler {
             if (c.binary()) rightPartitions = shufflePartitions;
         }
 
-        // Which Spark operators each plan really runs.
-        Map<String, Integer> baseOps = executionOperators(ctx, buildPlans(c, in, true, sinkDir));
-        Map<String, Integer> opOps = executionOperators(ctx, buildPlans(c, in, false, sinkDir));
         String added = joinCounts(minus(opOps, baseOps));
         String removed = joinCounts(minus(baseOps, opOps));
         String measured = "+" + added + (removed.isEmpty() ? "" : " -" + removed);
@@ -1214,7 +1388,9 @@ public final class SparkOperatorProfiler {
                 row.put("in_bytes", in.leftBytes);
                 row.put("right_in_bytes", c.binary() ? in.rightBytes : 0);
                 row.putAll(m);
+                row.putAll(baseline ? baseInfo.est : opInfo.est); // Wayang's estimate for this plan
                 row.putAll(env);
+                row.putAll(wayangEnv);
                 rows.add(row);
                 Object exec = m.get("wall_exec_ns") != null ? m.get("wall_exec_ns") : m.get("wall_total_ns");
                 System.err.printf("[wayangprof]   pair %d %-9s exec=%8.1fms cpu=%8.1fms task_cpu=%8.1fms shuffle=%7.1fMB tasks=%d energy=%s out=%d%n",

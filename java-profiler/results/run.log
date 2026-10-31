@@ -184,3 +184,113 @@ SLF4J: Actual provider is of type [org.apache.logging.slf4j.SLF4JServiceProvider
 [wayangprof]   pair 5 baseline  exec=    34.5ms cpu=    40.8ms alloc=     77.4MB energy=0.088J out=200000
 [wayangprof]   pair 6 baseline  exec=    33.9ms cpu=    40.6ms alloc=     77.4MB energy=0.066J out=200000
 [wayangprof]   pair 6 join      exec=   157.6ms cpu=   160.9ms alloc=    131.4MB energy=0.130J out=1000403
+==== Mon Nov  2 13:47:43 IST 2026  --add-estimates
+SLF4J: Class path contains multiple SLF4J providers.
+SLF4J: Found provider [org.apache.logging.slf4j.SLF4JServiceProvider@72758afa]
+SLF4J: Found provider [org.slf4j.simple.SimpleServiceProvider@fb9c7aa]
+SLF4J: See https://www.slf4j.org/codes.html#multiple_bindings for an explanation.
+SLF4J: Actual provider is of type [org.apache.logging.slf4j.SLF4JServiceProvider@72758afa]
+[wayangprof] heap4g-G1-cpuall|sort|text|r100000|rr0|k1000|s-|w8  Wayang estimate: baseline 43 ms, operator 119 ms
+SLF4J: Class path contains multiple SLF4J providers.
+SLF4J: Found provider [org.apache.logging.slf4j.SLF4JServiceProvider@72758afa]
+SLF4J: Found provider [org.slf4j.simple.SimpleServiceProvider@fb9c7aa]
+SLF4J: See https://www.slf4j.org/codes.html#multiple_bindings for an explanation.
+SLF4J: Actual provider is of type [org.apache.logging.slf4j.SLF4JServiceProvider@72758afa]
+[wayangprof] heap4g-G1-cpuall|sort|text|r1000000|rr0|k1000|s-|w8  Wayang estimate: baseline 360 ms, operator 1118 ms
+SLF4J: Class path contains multiple SLF4J providers.
+SLF4J: Found provider [org.apache.logging.slf4j.SLF4JServiceProvider@7fc6de5b]
+SLF4J: Found provider [org.slf4j.simple.SimpleServiceProvider@21baa903]
+SLF4J: See https://www.slf4j.org/codes.html#multiple_bindings for an explanation.
+SLF4J: Actual provider is of type [org.apache.logging.slf4j.SLF4JServiceProvider@7fc6de5b]
+[wayangprof] heap4g-G1-cpuall|join|text|r100000|rr100000|k100000|s-|w8  Wayang estimate: baseline 86 ms, operator 284 ms
+SLF4J: Class path contains multiple SLF4J providers.
+SLF4J: Found provider [org.apache.logging.slf4j.SLF4JServiceProvider@7fc6de5b]
+SLF4J: Found provider [org.slf4j.simple.SimpleServiceProvider@21baa903]
+SLF4J: See https://www.slf4j.org/codes.html#multiple_bindings for an explanation.
+SLF4J: Actual provider is of type [org.apache.logging.slf4j.SLF4JServiceProvider@7fc6de5b]
+[wayangprof] heap4g-G1-cpuall|join|text|r100000|rr100000|k10000|s-|w8  Wayang estimate: baseline 86 ms, operator 284 ms
+SLF4J: Class path contains multiple SLF4J providers.
+SLF4J: Found provider [org.apache.logging.slf4j.SLF4JServiceProvider@7fc6de5b]
+SLF4J: Found provider [org.slf4j.simple.SimpleServiceProvider@21baa903]
+SLF4J: See https://www.slf4j.org/codes.html#multiple_bindings for an explanation.
+SLF4J: Actual provider is of type [org.apache.logging.slf4j.SLF4JServiceProvider@7fc6de5b]
+[wayangprof] heap4g-G1-cpuall|join|text|r1000000|rr1000000|k1000000|s-|w8  Wayang estimate: baseline 721 ms, operator 2702 ms
+SLF4J: Class path contains multiple SLF4J providers.
+SLF4J: Found provider [org.apache.logging.slf4j.SLF4JServiceProvider@7fc6de5b]
+SLF4J: Found provider [org.slf4j.simple.SimpleServiceProvider@21baa903]
+SLF4J: See https://www.slf4j.org/codes.html#multiple_bindings for an explanation.
+SLF4J: Actual provider is of type [org.apache.logging.slf4j.SLF4JServiceProvider@7fc6de5b]
+[wayangprof] heap4g-G1-cpuall|join|text|r1000000|rr1000000|k100000|s-|w8  Wayang estimate: baseline 721 ms, operator 2703 ms
+SLF4J: Class path contains multiple SLF4J providers.
+SLF4J: Found provider [org.apache.logging.slf4j.SLF4JServiceProvider@72758afa]
+SLF4J: Found provider [org.slf4j.simple.SimpleServiceProvider@fb9c7aa]
+SLF4J: See https://www.slf4j.org/codes.html#multiple_bindings for an explanation.
+SLF4J: Actual provider is of type [org.apache.logging.slf4j.SLF4JServiceProvider@72758afa]
+[wayangprof] heap1g-Serial-cpu2|sort|text|r100000|rr0|k1000|s-|w8  Wayang estimate: baseline 43 ms, operator 119 ms
+SLF4J: Class path contains multiple SLF4J providers.
+SLF4J: Found provider [org.apache.logging.slf4j.SLF4JServiceProvider@7fc6de5b]
+SLF4J: Found provider [org.slf4j.simple.SimpleServiceProvider@21baa903]
+SLF4J: See https://www.slf4j.org/codes.html#multiple_bindings for an explanation.
+SLF4J: Actual provider is of type [org.apache.logging.slf4j.SLF4JServiceProvider@7fc6de5b]
+[wayangprof] heap1g-Serial-cpu2|join|text|r100000|rr100000|k100000|s-|w8  Wayang estimate: baseline 86 ms, operator 284 ms
+SLF4J: Class path contains multiple SLF4J providers.
+SLF4J: Found provider [org.apache.logging.slf4j.SLF4JServiceProvider@7fc6de5b]
+SLF4J: Found provider [org.slf4j.simple.SimpleServiceProvider@21baa903]
+SLF4J: See https://www.slf4j.org/codes.html#multiple_bindings for an explanation.
+SLF4J: Actual provider is of type [org.apache.logging.slf4j.SLF4JServiceProvider@7fc6de5b]
+[wayangprof] heap1g-Serial-cpu2|join|text|r100000|rr100000|k10000|s-|w8  Wayang estimate: baseline 86 ms, operator 284 ms
+==== Mon Nov  2 13:50:01 IST 2026  --add-estimates
+SLF4J: Class path contains multiple SLF4J providers.
+SLF4J: Found provider [org.apache.logging.slf4j.SLF4JServiceProvider@72758afa]
+SLF4J: Found provider [org.slf4j.simple.SimpleServiceProvider@fb9c7aa]
+SLF4J: See https://www.slf4j.org/codes.html#multiple_bindings for an explanation.
+SLF4J: Actual provider is of type [org.apache.logging.slf4j.SLF4JServiceProvider@72758afa]
+[wayangprof] heap4g-G1-cpuall|sort|text|r100000|rr0|k1000|s-|w8  Wayang estimate: baseline 43 ms, operator 119 ms
+SLF4J: Class path contains multiple SLF4J providers.
+SLF4J: Found provider [org.apache.logging.slf4j.SLF4JServiceProvider@72758afa]
+SLF4J: Found provider [org.slf4j.simple.SimpleServiceProvider@fb9c7aa]
+SLF4J: See https://www.slf4j.org/codes.html#multiple_bindings for an explanation.
+SLF4J: Actual provider is of type [org.apache.logging.slf4j.SLF4JServiceProvider@72758afa]
+[wayangprof] heap4g-G1-cpuall|sort|text|r1000000|rr0|k1000|s-|w8  Wayang estimate: baseline 360 ms, operator 1118 ms
+SLF4J: Class path contains multiple SLF4J providers.
+SLF4J: Found provider [org.apache.logging.slf4j.SLF4JServiceProvider@7fc6de5b]
+SLF4J: Found provider [org.slf4j.simple.SimpleServiceProvider@21baa903]
+SLF4J: See https://www.slf4j.org/codes.html#multiple_bindings for an explanation.
+SLF4J: Actual provider is of type [org.apache.logging.slf4j.SLF4JServiceProvider@7fc6de5b]
+[wayangprof] heap4g-G1-cpuall|join|text|r100000|rr100000|k100000|s-|w8  Wayang estimate: baseline 86 ms, operator 284 ms
+SLF4J: Class path contains multiple SLF4J providers.
+SLF4J: Found provider [org.apache.logging.slf4j.SLF4JServiceProvider@7fc6de5b]
+SLF4J: Found provider [org.slf4j.simple.SimpleServiceProvider@21baa903]
+SLF4J: See https://www.slf4j.org/codes.html#multiple_bindings for an explanation.
+SLF4J: Actual provider is of type [org.apache.logging.slf4j.SLF4JServiceProvider@7fc6de5b]
+[wayangprof] heap4g-G1-cpuall|join|text|r100000|rr100000|k10000|s-|w8  Wayang estimate: baseline 86 ms, operator 284 ms
+SLF4J: Class path contains multiple SLF4J providers.
+SLF4J: Found provider [org.apache.logging.slf4j.SLF4JServiceProvider@7fc6de5b]
+SLF4J: Found provider [org.slf4j.simple.SimpleServiceProvider@21baa903]
+SLF4J: See https://www.slf4j.org/codes.html#multiple_bindings for an explanation.
+SLF4J: Actual provider is of type [org.apache.logging.slf4j.SLF4JServiceProvider@7fc6de5b]
+[wayangprof] heap4g-G1-cpuall|join|text|r1000000|rr1000000|k1000000|s-|w8  Wayang estimate: baseline 721 ms, operator 2702 ms
+SLF4J: Class path contains multiple SLF4J providers.
+SLF4J: Found provider [org.apache.logging.slf4j.SLF4JServiceProvider@7fc6de5b]
+SLF4J: Found provider [org.slf4j.simple.SimpleServiceProvider@21baa903]
+SLF4J: See https://www.slf4j.org/codes.html#multiple_bindings for an explanation.
+SLF4J: Actual provider is of type [org.apache.logging.slf4j.SLF4JServiceProvider@7fc6de5b]
+[wayangprof] heap4g-G1-cpuall|join|text|r1000000|rr1000000|k100000|s-|w8  Wayang estimate: baseline 721 ms, operator 2703 ms
+SLF4J: Class path contains multiple SLF4J providers.
+SLF4J: Found provider [org.apache.logging.slf4j.SLF4JServiceProvider@72758afa]
+SLF4J: Found provider [org.slf4j.simple.SimpleServiceProvider@fb9c7aa]
+SLF4J: See https://www.slf4j.org/codes.html#multiple_bindings for an explanation.
+SLF4J: Actual provider is of type [org.apache.logging.slf4j.SLF4JServiceProvider@72758afa]
+[wayangprof] heap1g-Serial-cpu2|sort|text|r100000|rr0|k1000|s-|w8  Wayang estimate: baseline 43 ms, operator 119 ms
+SLF4J: Class path contains multiple SLF4J providers.
+SLF4J: Found provider [org.apache.logging.slf4j.SLF4JServiceProvider@7fc6de5b]
+SLF4J: Found provider [org.slf4j.simple.SimpleServiceProvider@21baa903]
+SLF4J: See https://www.slf4j.org/codes.html#multiple_bindings for an explanation.
+SLF4J: Actual provider is of type [org.apache.logging.slf4j.SLF4JServiceProvider@7fc6de5b]
+[wayangprof] heap1g-Serial-cpu2|join|text|r100000|rr100000|k100000|s-|w8  Wayang estimate: baseline 86 ms, operator 284 ms
+SLF4J: Class path contains multiple SLF4J providers.
+SLF4J: Found provider [org.apache.logging.slf4j.SLF4JServiceProvider@7fc6de5b]
+SLF4J: Found provider [org.slf4j.simple.SimpleServiceProvider@21baa903]
+SLF4J: See https://www.slf4j.org/codes.html#multiple_bindings for an explanation.
+SLF4J: Actual provider is of type [org.apache.logging.slf4j.SLF4JServiceProvider@7fc6de5b]
+[wayangprof] heap1g-Serial-cpu2|join|text|r100000|rr100000|k10000|s-|w8  Wayang estimate: baseline 86 ms, operator 284 ms

@@ -1,8 +1,9 @@
 # Training-Data
 
 Measured resource usage of Apache Wayang operators on two platforms, **Java** and **Spark**, collected as
-training data for an ML cost model. All numbers are real measurements from running the operators, not
-Wayang's own cost estimates.
+training data for an ML cost model. All measured numbers are real measurements from running the operators.
+Next to them, every row also holds **Wayang's own estimate** for the same plan (`wayang_est_*` columns: CPU
+cycles, disk, network, RAM, time, cost), so the measured cost can be compared with what Wayang predicts.
 
 Both profilers use the same method, the same input data and the same CSV layout:
 
@@ -26,6 +27,7 @@ Training-Data/
 │   ├── README.md                  method, how to run, full list of measured columns
 │   ├── run-profiling.sh           runs the profiler over a grid of configs (start here)
 │   ├── analyze.py                 turns raw.csv into pairs.csv, operator_costs.csv, baseline_costs.csv
+│   ├── wayang_estimates.py        adds Wayang's estimates to rows already in raw.csv (--add-estimates)
 │   ├── log4j2-quiet.xml           logging config that silences Wayang's output during runs
 │   ├── src/wayangprof/
 │   │   └── JavaOperatorProfiler.java   the profiler: generates data, runs plans, records metrics
@@ -42,6 +44,7 @@ Training-Data/
     ├── README.md                  single-node cluster setup, method, Spark-specific columns
     ├── run-profiling.sh           runs the profiler over a grid of configs (start here)
     ├── analyze.py                 same analysis as the Java one, with Spark columns
+    ├── wayang_estimates.py        same as the Java one
     ├── log4j2-quiet.xml
     ├── src/wayangprof/
     │   └── SparkOperatorProfiler.java  the profiler: Spark plans, counting sink, Spark task metrics
@@ -98,6 +101,25 @@ followed by the **measured resource usage**:
 | Disk | `os_disk_read_bytes`, `os_disk_write_bytes` | same, plus `input_bytes`, `output_bytes` | bytes |
 | OS activity | `os_page_faults`, `os_context_switches`, `os_syscalls_unix` | same | count |
 | Network | `network_bytes` (always 0) | `network_bytes` (0 on a single node) | bytes |
+
+and **Wayang's estimates** for the same plan (read from Wayang's optimizer, not measured):
+
+| Estimate | Columns | Unit | Compare with |
+|---|---|---|---|
+| CPU | `wayang_est_cpu_cycles_lower`, `_upper` | cycles | `os_cycles`; Java `thread_cpu_exec_ns`, Spark `task_cpu_ns` |
+| Disk | `wayang_est_disk_bytes_lower`, `_upper` | bytes | `os_disk_*`; Spark `shuffle_write_bytes`, `spill_disk_bytes` |
+| Network | `wayang_est_network_bytes_lower`, `_upper` | bytes | `network_bytes` |
+| RAM | `wayang_est_ram_bytes_lower`, `_upper` | bytes | `heap_peak_bytes`, `live_heap_after_gc_max_bytes` |
+| Time | `wayang_est_time_ms_lower`, `_upper`, `_gmean`, plus `wayang_est_overhead_ms`, `wayang_est_startup_ms` | ms | `wall_exec_ns` / 1e6 |
+| Cost | `wayang_est_cost_lower`, `_upper` | Wayang cost units | |
+| Rows | `wayang_est_out_rows_lower`, `_upper` (Wayang's cardinality estimate) | rows | `out_rows` |
+| Settings | `wayang_cpu_mhz`, `wayang_cores`, `wayang_disk_ms_per_mb`, `wayang_network_ms_per_mb`, `wayang_cost_per_ms`, `wayang_cost_model` | | |
+
+Like the measured columns, they are operator plan − baseline plan in `pairs.csv` and `operator_costs.csv`.
+Wayang works from its own row-count guesses and default machine settings, so the gap to the measured cost
+mixes cardinality and cost-formula errors. Details:
+[java-profiler/README.md](java-profiler/README.md#wayangs-own-estimates). Rows measured before these columns
+existed get them with `./run-profiling.sh --add-estimates` (measures nothing, changes no measured value).
 
 Each numeric column in `operator_costs.csv` has a matching `<column>_iqr` with its spread. The full column
 lists are in [java-profiler/README.md](java-profiler/README.md#what-is-measured) and

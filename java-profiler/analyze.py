@@ -27,14 +27,21 @@ ID_COLS = [
     "measured_execution_operators", "baseline_plan", "source", "rows", "right_rows", "keys", "sel", "words",
     "in_bytes", "right_in_bytes", "tag", "host", "os_name", "os_arch", "cpu_model", "cpus",
     "machine_memory_bytes", "java_version", "jvm_args", "gc_name", "max_heap_bytes", "os_probe",
+    # Wayang settings used to turn its load estimates into time and cost
+    "wayang_cpu_mhz", "wayang_cores", "wayang_disk_ms_per_mb", "wayang_network_ms_per_mb", "wayang_cost_per_ms",
+    "wayang_cost_model",
 ]
 # Columns that are neither features nor metrics to subtract.
-SKIP_COLS = {"timestamp", "run_id", "plan", "pair", "plan_execution_operators", "same_thread", "jobs"}
+SKIP_COLS = {"timestamp", "run_id", "plan", "pair", "plan_execution_operators",
+             "wayang_est_breakdown", "wayang_est_time_prob", "same_thread", "jobs"}
 # Taken from the operator run (not subtracted): what the operator produced and the machine state.
-OPERATOR_SIDE = ["out_rows", "out_bytes", "sys_load_avg_1m", "sys_free_memory_bytes"]
+# wayang_est_out_rows_*: rows Wayang expects to reach the sink, to compare with out_rows.
+OPERATOR_SIDE = ["out_rows", "out_bytes", "sys_load_avg_1m", "sys_free_memory_bytes",
+                 "wayang_est_out_rows_lower", "wayang_est_out_rows_upper"]
 # Main metrics shown in the printed summary: (column, unit divisor, unit label).
 SUMMARY = [
     ("wall_exec_ns", 1e6, "wall ms"),
+    ("wayang_est_time_ms_gmean", 1, "wayang ms"),
     ("thread_cpu_exec_ns", 1e6, "cpu ms"),
     ("thread_alloc_exec_bytes", 1e6, "alloc MB"),
     ("os_instructions", 1e6, "M instr"),

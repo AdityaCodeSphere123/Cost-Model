@@ -189,3 +189,23 @@ SLF4J: Actual provider is of type [org.apache.logging.slf4j.SLF4JServiceProvider
 [wayangprof]   pair 5 baseline  exec=    27.6ms cpu=   141.0ms task_cpu=    52.5ms shuffle=    0.0MB tasks=4 energy=0.229J out=200000
 [wayangprof]   pair 6 baseline  exec=    31.4ms cpu=   138.0ms task_cpu=    59.0ms shuffle=    0.0MB tasks=4 energy=0.209J out=200000
 [wayangprof]   pair 6 join      exec=   263.1ms cpu=   613.8ms task_cpu=   477.0ms shuffle=   13.2MB tasks=8 energy=1.039J out=1000403
+==== Mon Nov  2 13:48:01 IST 2026  --add-estimates
+[wayangprof] heap4g-G1-cpuall|sort|text|r100000|rr0|k1000|s-|w8  Wayang estimate: baseline 101 ms, operator 133 ms
+[wayangprof] heap4g-G1-cpuall|sort|text|r1000000|rr0|k1000|s-|w8  Wayang estimate: baseline 194 ms, operator 258 ms
+[wayangprof] heap4g-G1-cpuall|join|text|r100000|rr100000|k100000|s-|w8  Wayang estimate: baseline 159 ms, operator 265 ms
+[wayangprof] heap4g-G1-cpuall|join|text|r100000|rr100000|k10000|s-|w8  Wayang estimate: baseline 159 ms, operator 265 ms
+[wayangprof] heap4g-G1-cpuall|join|text|r1000000|rr1000000|k1000000|s-|w8  Wayang estimate: baseline 357 ms, operator 809 ms
+[wayangprof] heap4g-G1-cpuall|join|text|r1000000|rr1000000|k100000|s-|w8  Wayang estimate: baseline 357 ms, operator 809 ms
+[wayangprof] heap1g-Serial-cpu2|sort|text|r100000|rr0|k1000|s-|w8  Wayang estimate: baseline 487 ms, operator 635 ms
+[wayangprof] heap1g-Serial-cpu2|join|text|r100000|rr100000|k100000|s-|w8  Wayang estimate: baseline 741 ms, operator 1272 ms
+[wayangprof] heap1g-Serial-cpu2|join|text|r100000|rr100000|k10000|s-|w8  Wayang estimate: baseline 740 ms, operator 1271 ms
+==== Mon Nov  2 13:50:08 IST 2026  --add-estimates
+[wayangprof] heap4g-G1-cpuall|sort|text|r100000|rr0|k1000|s-|w8  Wayang estimate: baseline 101 ms, operator 133 ms
+[wayangprof] heap4g-G1-cpuall|sort|text|r1000000|rr0|k1000|s-|w8  Wayang estimate: baseline 194 ms, operator 258 ms
+[wayangprof] heap4g-G1-cpuall|join|text|r100000|rr100000|k100000|s-|w8  Wayang estimate: baseline 159 ms, operator 265 ms
+[wayangprof] heap4g-G1-cpuall|join|text|r100000|rr100000|k10000|s-|w8  Wayang estimate: baseline 159 ms, operator 265 ms
+[wayangprof] heap4g-G1-cpuall|join|text|r1000000|rr1000000|k1000000|s-|w8  Wayang estimate: baseline 357 ms, operator 809 ms
+[wayangprof] heap4g-G1-cpuall|join|text|r1000000|rr1000000|k100000|s-|w8  Wayang estimate: baseline 357 ms, operator 809 ms
+[wayangprof] heap1g-Serial-cpu2|sort|text|r100000|rr0|k1000|s-|w8  Wayang estimate: baseline 487 ms, operator 635 ms
+[wayangprof] heap1g-Serial-cpu2|join|text|r100000|rr100000|k100000|s-|w8  Wayang estimate: baseline 741 ms, operator 1272 ms
+[wayangprof] heap1g-Serial-cpu2|join|text|r100000|rr100000|k10000|s-|w8  Wayang estimate: baseline 740 ms, operator 1271 ms

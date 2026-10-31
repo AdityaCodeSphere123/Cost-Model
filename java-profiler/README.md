@@ -1,7 +1,8 @@
 # Java operator profiler
 
 Measures the **real** resources each Wayang Java operator uses, as training data for the ML cost model.
-Nothing comes from Wayang's cost estimates.
+No measured column comes from Wayang's cost estimates. Wayang's own estimates for the same plans are stored
+next to them in separate `wayang_*` columns, for comparison (see [Wayang's own estimates](#wayangs-own-estimates)).
 
 ## Method
 
@@ -28,6 +29,7 @@ Operators: map, filter, flatmap, reduceby, groupby, globalreduce, count, distinc
 ./run-profiling.sh                      # default grid (78 configs)
 ./run-profiling.sh --profile full       # large grid, many hours
 ./run-profiling.sh --ops "sort join" --rows "100000 1000000" --resources "4g:G1:all 1g:Serial:2"
+./run-profiling.sh --add-estimates      # add Wayang's estimates to rows already in raw.csv (measures nothing)
 ./run-profiling.sh --help
 ```
 
@@ -63,6 +65,44 @@ GC columns have the same names for every garbage collector: `gc_young_*` (G1 you
 `*_exec_*` columns start at the first record, so they leave out Wayang's plan optimization; `*_total_*`
 cover the whole `execute()` call. `thread_*` columns count only the thread that runs the operator.
 `os_*` columns count the whole JVM process, including JIT and GC threads, so they are noisier.
+
+## Wayang's own estimates
+
+Every row also holds what Wayang's optimizer **predicts** for the same plan. The profiler optimizes each plan
+the way Wayang does before running it, then reads the estimate Wayang stored for every execution task
+(including channel conversions) and adds them up. Nothing is measured for these columns.
+
+| Column | Meaning | Compare with |
+|---|---|---|
+| `wayang_est_cpu_cycles_lower/upper` | CPU cycles (Wayang's load profile, UDF part included) | `os_cycles`, `thread_cpu_exec_ns` |
+| `wayang_est_disk_bytes_lower/upper` | disk bytes | `os_disk_read_bytes`, `os_disk_write_bytes` |
+| `wayang_est_network_bytes_lower/upper` | network bytes | `network_bytes` |
+| `wayang_est_ram_bytes_lower/upper` | RAM bytes | `live_heap_after_gc_max_bytes`, `heap_peak_bytes` |
+| `wayang_est_overhead_ms` | fixed overhead in the load profiles | |
+| `wayang_est_time_ms_lower/upper/gmean` | time Wayang derives from the load (gmean = geometric mean, what the optimizer uses) | `wall_exec_ns` / 1e6 |
+| `wayang_est_cost_lower/upper` | cost = time × `wayang.java.costs.per-ms` (the vector model's money axis) | |
+| `wayang_est_startup_ms` | platform start-up, not included in `wayang_est_time_ms_*` (0 for Java) | |
+| `wayang_est_out_rows_lower/upper` | rows Wayang expects at the sink (its cardinality estimate) | `out_rows` |
+| `wayang_est_tasks` | execution tasks in the plan | |
+| `wayang_est_breakdown` (raw.csv only) | per task: estimated input/output rows, cycles, disk, network, ms | |
+| `wayang_cpu_mhz`, `wayang_cores`, `wayang_disk_ms_per_mb`, `wayang_network_ms_per_mb`, `wayang_cost_per_ms`, `wayang_cost_model` | Wayang settings used to turn load into time and cost (features, not subtracted) | |
+
+The estimate columns are handled like the measured ones: `pairs.csv` and `operator_costs.csv` hold
+operator plan − baseline plan, which is Wayang's estimate of the operator itself; `baseline_costs.csv` holds
+the baseline plan's estimate. Estimates do not change between runs of a config, so their `_iqr` is 0.
+
+Things to know when comparing:
+
+- Wayang uses its **own cardinality estimates**, not the real row counts (e.g. a default selectivity for
+  filters and a key-independent output size for joins). Compare `wayang_est_out_rows_*` with `out_rows` to
+  separate cardinality errors from cost-formula errors.
+- Wayang's time assumes its default machine (`wayang.java.cpu.mhz = 2700`, 1 core), not the measured one.
+- Each profiler plan runs on one platform, so there is only one possible execution plan; the plan pick (the
+  scalar or the multi-objective vector cost model) cannot change these numbers. The load estimates come from
+  the per-operator estimators, which the vector change does not touch.
+- Rows measured before these columns existed get them with `./run-profiling.sh --add-estimates`. It runs only
+  the optimizer for each config in `raw.csv`, checks that Wayang still picks the same execution operators as
+  in the measured run, and then adds the columns and redoes the analysis. Measured values are not changed.
 
 ## Notes
 

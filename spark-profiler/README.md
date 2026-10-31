@@ -2,7 +2,9 @@
 
 Measures the **real** resources each Wayang Spark operator uses, as training data for the ML cost model.
 It is the Spark version of [`../java-profiler`](../java-profiler/README.md): same method, same input data,
-same plan shapes, same CSV layout. Nothing comes from Wayang's cost estimates.
+same plan shapes, same CSV layout. No measured column comes from Wayang's cost estimates. Wayang's own
+estimates for the same plans are stored next to them in separate `wayang_*` columns, for comparison (see
+[Wayang's own estimates](#wayangs-own-estimates)).
 
 ## Cluster setup: a single-node Spark cluster
 
@@ -64,6 +66,7 @@ Operators: map, filter, flatmap, reduceby, groupby, globalreduce, count, distinc
 ./run-profiling.sh                      # default grid (78 configs, same as the Java profiler)
 ./run-profiling.sh --profile full       # large grid with 6 resource settings, many hours
 ./run-profiling.sh --ops "sort join" --rows "100000 1000000" --resources "4g:G1:all 4g:G1:2"
+./run-profiling.sh --add-estimates      # add Wayang's estimates to rows already in raw.csv (measures nothing)
 ./run-profiling.sh --help
 ```
 
@@ -124,6 +127,34 @@ GC columns have the same names for every garbage collector: `gc_young_*` (G1 you
 
 All `os_*` and `process_*` columns count the whole JVM, which here includes the driver, the executor, and
 the GC and JIT threads.
+
+## Wayang's own estimates
+
+Every row also holds what Wayang's optimizer **predicts** for the same plan, in the same `wayang_*` columns
+as the Java profiler (full list and caveats in
+[the Java README](../java-profiler/README.md#wayangs-own-estimates)): CPU cycles, disk bytes, network bytes,
+RAM bytes, overhead, time (ms), cost, estimated sink rows, and a per-task breakdown in `raw.csv`. The
+profiler optimizes each plan the way Wayang does before running it and adds up the estimates of all
+execution tasks. In `pairs.csv` and `operator_costs.csv` they are operator plan − baseline plan, like the
+measured columns.
+
+Spark-specific points:
+
+| Wayang estimate | Compare with |
+|---|---|
+| `wayang_est_cpu_cycles_*` | `os_cycles`, `task_cpu_ns` |
+| `wayang_est_disk_bytes_*` | `shuffle_write_bytes`, `spill_disk_bytes`, `os_disk_*` (Wayang charges disk for shuffles, e.g. in join) |
+| `wayang_est_network_bytes_*` | `network_bytes` (0 on a single node) |
+| `wayang_est_time_ms_*` | `wall_exec_ns` / 1e6 |
+
+- Wayang divides CPU cycles by `wayang.spark.machines × cores-per-machine`. The profiler sets this to the
+  task threads of the run, so `wayang_cores` = `task_slots`. Clock speed is Wayang's default
+  (`wayang_cpu_mhz` = 2700), not the measured machine's.
+- `wayang_est_startup_ms` (Spark start-up, 4.5 s by default) is not included in `wayang_est_time_ms_*`. The
+  profiler keeps one SparkContext for all runs, so the measurements do not include start-up either. Union's
+  baseline runs two jobs, so it counts start-up twice.
+- `./run-profiling.sh --add-estimates` uses `shuffle_partitions / 2` as the cores of each config, so old rows
+  get exactly the estimate a new run would write. It runs only Wayang's optimizer, not Spark.
 
 ## Notes
 

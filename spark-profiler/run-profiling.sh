@@ -17,6 +17,10 @@
 #   ./run-profiling.sh --profile full                  # large grid, many hours
 #   ./run-profiling.sh --ops "filter sort join" --rows "100000 1000000"
 #   ./run-profiling.sh --resources "4g:G1:all 4g:G1:4 4g:G1:1"
+#   ./run-profiling.sh --add-estimates                 # add Wayang's estimates to rows already in raw.csv
+#
+# Every row also gets Wayang's own estimate for the same plan (wayang_est_* columns: CPU cycles, disk,
+# network, RAM, time, cost), read from Wayang's optimizer. Nothing is measured for those columns.
 #
 # A resource setting is HEAP:GC:CORES
 #   HEAP   JVM heap (-Xms and -Xmx), e.g. 2g, 4g, 8g. Driver and executor share it in local mode.
@@ -59,12 +63,13 @@ TIMEOUT_S=1800          # per JVM run
 MAX_OUT_ROWS=20000000   # skip join/cartesian configs that would produce more output rows than this
 DRY_RUN=0
 RESUME=1
+ADD_ESTIMATES=0
 COLD=0
 TAG=""
 JAVA_EXTRA="${JAVA_EXTRA:-}"
 
 usage() {
-  sed -n '2,28p' "$0" | sed 's/^# \{0,1\}//'
+  sed -n '2,/^[^#]/p' "$0" | grep '^#' | sed 's/^# \{0,1\}//'
   cat <<EOF
 
 Options
@@ -82,6 +87,8 @@ Options
   --tag TEXT                     free text stored with every row
   --no-resume                    run configs again even if raw.csv already has them
   --dry-run                      only print the configs
+  --add-estimates                measure nothing: add Wayang's estimates (wayang_* columns) to every row
+                                 already in raw.csv, then redo the analysis
 Environment: WAYANG_HOME, WAYANG_SRC, JAVA_HOME, SPARK_JARS (classpath of Spark 3.5 jars, optional),
              HOST_LABEL (machine label for the host column), JAVA_EXTRA (more JVM flags), PYTHON
 EOF
@@ -103,6 +110,7 @@ while [[ $# -gt 0 ]]; do
     --tag) TAG="$2"; shift 2 ;;
     --no-resume) RESUME=0; shift ;;
     --dry-run) DRY_RUN=1; shift ;;
+    --add-estimates) ADD_ESTIMATES=1; shift ;;
     -h|--help) usage; exit 0 ;;
     *) echo "Unknown option: $1"; usage; exit 2 ;;
   esac
@@ -370,6 +378,36 @@ COLD_ARGS=()
 if (( COLD )); then
   if sudo -n true 2>/dev/null; then COLD_ARGS=(--cold-cmd "$(cold_cmd)")
   else say "WARNING: --cold needs passwordless sudo; running with a warm file cache instead."; fi
+fi
+
+# ---------------------------------------------------------------------------------------------
+# --add-estimates: Wayang's estimates for the rows already in raw.csv (only the optimizer runs, not Spark)
+# ---------------------------------------------------------------------------------------------
+if (( ADD_ESTIMATES )); then
+  [[ -s "$RAW" ]] || { echo "No $RAW to add estimates to."; exit 1; }
+  EST="$OUT_DIR/wayang_estimates.csv"
+  rm -f "$EST"
+  echo "==== $(date)  --add-estimates" >>"$LOG"
+  say "computing Wayang's estimates for the configs in $RAW"
+  FAILED=0
+  while IFS='|' read -r op src n rr k s w label cores; do
+    right=$n; (( rr > 0 )) && right=$rr
+    if [[ "$src" == "text" ]]; then
+      ensure_input "$n" "$k" "$w" 42
+      [[ "$op" == "join" || "$op" == "union" || "$op" == "cartesian" ]] && ensure_input "$right" "$k" "$w" 43
+    fi
+    # cores = the task threads of the measured run (shuffle_partitions / 2); Wayang's Spark estimate uses it.
+    # shellcheck disable=SC2086
+    "$JAVA" $OPENS $JAVA_EXTRA -Dlog4j.configurationFile="file://$HERE/log4j2-quiet.xml" -cp "$CP" wayangprof.SparkOperatorProfiler \
+      --op "$op" --source "$src" --rows "$n" --right-rows "$right" --keys "$k" --sel "$s" --words "$w" \
+      --cores "${cores:-all}" --data-dir "$DATA_DIR" --resource "$label" --estimate-only --out "$EST" </dev/null >>"$LOG" 2>&1 \
+      || { FAILED=$((FAILED + 1)); say "   FAILED $label|$op|$src|r$n (see $LOG)"; }
+  done < <("$PYTHON" "$HERE/wayang_estimates.py" configs "$RAW")
+  (( FAILED == 0 )) || { say "$FAILED configs failed; raw.csv not changed"; exit 1; }
+  "$PYTHON" "$HERE/wayang_estimates.py" merge "$RAW" "$EST" || exit 1
+  rm -f "$EST"  # everything in it is now in raw.csv
+  "$PYTHON" "$HERE/analyze.py" "$RAW" --out "$OUT_DIR"
+  exit 0
 fi
 
 CPU_MODEL="$(cpu_model)"

@@ -1,4 +1,4 @@
-# Training-Data
+# Cost-Model
 
 Measured resource usage of Apache Wayang operators on two platforms, **Java** and **Spark**, collected as
 training data for an ML cost model. All measured numbers are real measurements from running the operators.
@@ -21,7 +21,7 @@ operator cost = operator run - baseline run   (per pair, then median over pairs)
 ## File structure
 
 ```
-Training-Data/
+Cost-Model/
 ├── README.md                      this file
 ├── java-profiler/
 │   ├── README.md                  method, how to run, full list of measured columns

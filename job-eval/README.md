@@ -38,7 +38,7 @@ Median q-error over jobs (max(predicted / measured, measured / predicted), 1 = p
   it at ~10 ms at any size; measured gaps are 0.1–1.1 s at 1M rows (flatmap-count 1M: 1,209 ms measured,
   Wayang 121 ms). The model uses Wayang's estimate for conversions, so it inherits this error. Profiling
   conversions is the next step.
-- **Wayang's row counts** are rough (e.g. it assumes a filter keeps 10% of rows; it kept 50%), which costs
+- **Wayang's row counts** are rough (e.g. for a filter it only knows "between 10% and 100% of the rows"), which costs
   the model 1.31 → 1.39 when it has to use them.
 - Only runtime is compared for jobs. The jobs record wall time only, not CPU or memory.
 

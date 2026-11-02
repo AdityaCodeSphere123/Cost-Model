@@ -40,6 +40,7 @@ Cost-Model/
 │       ├── operator_costs.csv
 │       ├── baseline_costs.csv
 │       └── run.log
+├── model/                       the cost model trained on this data (see model/README.md)
 └── spark-profiler/
     ├── README.md                  single-node cluster setup, method, Spark-specific columns
     ├── run-profiling.sh           runs the profiler over a grid of configs (start here)

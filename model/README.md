@@ -96,9 +96,25 @@ The model is trained with the **measured** row counts, so it learns "cost given 
 gets Wayang's **estimated** row counts (`--cardinalities wayang`). This keeps row-count errors separate from
 cost errors: compare the two settings to see how much of the remaining error comes from cardinalities.
 
-## Status
+## Results (2 Nov 2026)
 
-The code is complete and tested, but there are only 126 measured rows (18 configs, 2 operators), so the
-numbers in a report today show that the pipeline works, not how accurate the model is. With the planned
-30–40k rows per platform the same commands give the real result. Next step after that: export to ONNX and
+Trained on 1,653 rows: 1,560 operator pairs (Java 765, Spark 795, 13 operators) plus 93 scan rows, 1,500
+epochs. Reports, metrics and per-row test predictions are in [`results/`](results/) (copies of `runs/`,
+which git ignores).
+
+| Run | Test set | Runtime: Wayang → model | CPU: Wayang → model | Memory: Wayang → model |
+|---|---|---|---|---|
+| [A-random-split](results/A-random-split/report.md) | 20% of configs (118 configs, 320 rows) | 5.70 → **1.31** | 5.48 → **1.41** | 7.84 → **1.01** |
+| [B-extrapolate-1M](results/B-extrapolate-1M/report.md) | all configs with > 300k rows (113 configs, 323 rows) | 4.27 → **1.44** | 6.25 → **1.63** | 31.85 → **1.05** |
+| [C-all-data](results/C-all-data/report.md) | none: trained on everything, used for the jobs in `../job-eval` | | | |
+
+Median q-error (1 = perfect). Things the model learned (see the reports):
+
+- CPU: the model scales Wayang's CPU estimate by 0.0–0.4 for almost every operator. Wayang assumes a
+  2.7 GHz machine with fixed per-row costs and overestimates CPU on this machine many times over.
+- p ≈ 1.6–1.8 on both platforms: CPU and I/O time mostly add up rather than overlap.
+- Energy is the weakest output (median 1.74, p90 14.9): process energy on macOS is noisy for short runs.
+
+Commands to reproduce: `train.py --epochs 1500 --out runs/A-random-split`, `--holdout-rows 300000` for B,
+`--test-frac 0` for C. Next steps: more data (HPC), profile cross-platform conversions, export to ONNX and
 load it in Wayang through the ML plugin (`wayang-plugins/wayang-ml`, `OrtMLModel`).

@@ -41,6 +41,9 @@ Cost-Model/
 │       ├── baseline_costs.csv
 │       └── run.log
 ├── model/                       the cost model trained on this data (see model/README.md)
+│   └── results/                   reports of the trained models (held-out q-errors vs Wayang)
+├── job-eval/                      multi-operator jobs: measured vs Wayang vs model (see job-eval/README.md)
+│   └── results/                   job_comparison.md / .csv, raw job runs, charts/*.png
 └── spark-profiler/
     ├── README.md                  single-node cluster setup, method, Spark-specific columns
     ├── run-profiling.sh           runs the profiler over a grid of configs (start here)
@@ -126,18 +129,46 @@ Each numeric column in `operator_costs.csv` has a matching `<column>_iqr` with i
 lists are in [java-profiler/README.md](java-profiler/README.md#what-is-measured) and
 [spark-profiler/README.md](spark-profiler/README.md#what-is-measured).
 
-**Current coverage**: the same 9 configs on both platforms (Apple M4 Pro, 24 GB RAM, macOS, Java 17):
+**Current coverage** (Apple M4 Pro, 12 cores, 24 GB RAM, macOS, Java 17), all 13 operators, inputs from 1k
+to 1M rows (10k, 30k, 100k, 300k, 1M; cartesian 1k–10k × 10–1,000), every row with Wayang's estimates:
 
-| Operator | Resource | rows × right_rows | keys |
+| Platform | Settings (configs) | Configs | Rows in `pairs.csv` |
 |---|---|---|---|
-| sort | heap4g-G1-cpuall | 100k, 1M | 1,000 |
-| sort | heap1g-Serial-cpu2 | 100k | 1,000 |
-| join | heap4g-G1-cpuall | 100k × 100k | 10,000 / 100,000 |
-| join | heap4g-G1-cpuall | 1M × 1M | 100,000 / 1,000,000 |
-| join | heap1g-Serial-cpu2 | 100k × 100k | 10,000 / 100,000 |
+| Java | `heap4g-G1-cpuall` (125), `heap1g-Serial-cpu2` (118) | 243 | 765 |
+| Spark | `heap4g-G1-cpuall` (125), `heap4g-G1-cpu4` (125), `heap1g-Serial-cpu2` (3) | 253 | 795 |
 
-This is a first, small run. Running `./run-profiling.sh` in either folder adds the rest of the default grid
-(78 configs, 13 operators) and continues where it left off.
+Most configs were measured with 2 warm-up + 3 pairs (`--tag demo`, 2 Nov 2026); the first 9–18 configs with
+3 + 7. Running `./run-profiling.sh` in either folder adds more and continues where it left off.
+
+## Results: the cost model vs Wayang
+
+The cost model in [`model/`](model/README.md) is trained on this data and compared with Wayang's own
+estimates. q-error = max(predicted / measured, measured / predicted): how many times off, 1 is perfect
+(median over all cases).
+
+**Single operators** on configs the model never saw
+([model/results/](model/results/A-random-split/report.md)):
+
+| | Wayang | Cost model |
+|---|---|---|
+| Runtime (320 held-out rows) | 5.70 | **1.31** |
+| CPU | 5.48 | **1.41** |
+| Memory | 7.84 | **1.01** |
+| Runtime on 1M-row inputs, trained only on ≤ 300k rows | 4.27 | **1.44** |
+
+**Whole multi-operator jobs** (5 jobs × 2 sizes × Java / Spark / mixed = 30 jobs, measured runtime vs
+predicted; [job-eval/](job-eval/README.md)):
+
+| Placement | Wayang | Cost model | Model closer |
+|---|---|---|---|
+| Java only | 4.51 | **1.13** | 10 of 10 |
+| Spark only | 2.08 | **1.29** | 7 of 10 |
+| Mixed (Spark scan, Java rest) | **1.61** | 2.04 | 5 of 10 |
+| All 30 jobs | 2.69 | **1.29** | 22 of 30 |
+
+With Wayang's own row-count estimates instead of the real ones (what the model gets inside Wayang), the model
+scores 1.53 over all jobs. Mixed jobs are its weak spot because the Spark → Java conversion (`SparkCollect`)
+is not profiled yet: Wayang estimates it at ~10 ms at any size, while the measured gap is 0.1–1.1 s at 1M rows.
 
 ### `java-profiler/data/` (inputs, shared by both profilers)
 

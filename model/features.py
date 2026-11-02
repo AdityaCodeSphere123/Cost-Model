@@ -15,6 +15,7 @@ All definitions of what a target means are in TARGETS below, in one place.
 """
 import csv
 import math
+import os
 from dataclasses import dataclass, field
 
 import numpy as np
@@ -124,14 +125,45 @@ SCALES = {"cpu": 1e-3, "io": 1e-4, "net": 1e-4, "mem": 1e-3, "runtime": 1e-3, "e
 # Rows -> arrays
 # ------------------------------------------------------------------------------------------
 def load_rows(paths):
+    """Rows of pairs.csv files; baseline_costs.csv files become 'scan' rows (source -> parse -> sink)."""
     rows = []
     for path in paths:
+        if "baseline_costs" in os.path.basename(path):
+            rows.extend(scan_rows(path))
+            continue
         with open(path, newline="") as f:
             for r in csv.DictReader(f):
                 r["_platform"] = platform_of(r)
                 r["_group"] = r["_platform"] + "|" + r["config_id"]  # all pairs of one config stay together
                 rows.append(r)
     return rows
+
+
+def scan_rows(path):
+    """The profilers' baseline (source -> parse -> sink, one input) as an operator called 'scan'.
+
+    Many operator configs share the same baseline, so each (platform, setting, input) is kept once. With it the
+    model can predict a whole job: its scans plus its operators.
+    """
+    seen, out = set(), []
+    with open(path, newline="") as f:
+        for r in csv.DictReader(f):
+            if r.get("baseline_plan") != "source>parse>sink":
+                continue  # two-input baselines (join, union, cartesian) are not a single scan
+            p = platform_of(r)
+            key = (p, r.get("resource"), r.get("source"), r.get("rows"), r.get("keys"), r.get("words"))
+            if key in seen:
+                continue
+            seen.add(key)
+            r = dict(r)
+            r[p + "_execution_operator"] = ("Spark" if p == "spark" else p.capitalize()) + "Scan"
+            r.update({"operator": "scan", "sel": "", "right_rows": "0", "right_in_bytes": "0", "pair": "0",
+                      "out_rows": r.get("out_rows") or r.get("rows")})
+            r["config_id"] = "|".join(str(x) for x in key[1:]) + "|scan"
+            r["_platform"] = p
+            r["_group"] = p + "|" + r["config_id"]
+            out.append(r)
+    return out
 
 
 def is_binary(r):

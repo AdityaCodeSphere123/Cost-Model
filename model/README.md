@@ -106,7 +106,8 @@ which git ignores).
 |---|---|---|---|---|
 | [A-random-split](results/A-random-split/report.md) | 20% of configs (118 configs, 320 rows) | 5.70 → **1.31** | 5.48 → **1.41** | 7.84 → **1.01** |
 | [B-extrapolate-1M](results/B-extrapolate-1M/report.md) | all configs with > 300k rows (113 configs, 323 rows) | 4.27 → **1.44** | 6.25 → **1.63** | 31.85 → **1.05** |
-| [C-all-data](results/C-all-data/report.md) | none: trained on everything, used for the jobs in `../job-eval` | | | |
+| [C-all-data](results/C-all-data/report.md) | none: trained on everything | | | |
+| [D-no-job-sizes](results/D-no-job-sizes/report.md) | none: trained without any 100k / 1M-row configs; tested on the multi-operator jobs in `../job-eval` | | | |
 
 Median q-error (1 = perfect). Things the model learned (see the reports):
 
@@ -116,5 +117,5 @@ Median q-error (1 = perfect). Things the model learned (see the reports):
 - Energy is the weakest output (median 1.74, p90 14.9): process energy on macOS is noisy for short runs.
 
 Commands to reproduce: `train.py --epochs 1500 --out runs/A-random-split`, `--holdout-rows 300000` for B,
-`--test-frac 0` for C. Next steps: more data (HPC), profile cross-platform conversions, export to ONNX and
+`--test-frac 0` for C, and for D the same on profiler CSVs with the 100k and 1M-row rows removed. Next steps: more data (HPC), profile cross-platform conversions, export to ONNX and
 load it in Wayang through the ML plugin (`wayang-plugins/wayang-ml`, `OrtMLModel`).

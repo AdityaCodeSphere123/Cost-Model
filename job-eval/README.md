@@ -19,25 +19,28 @@ Each job runs at two sizes (100k and 1M rows; the join with 10k or 100k keys) an
 
 ## Results (2 Nov 2026)
 
-Model `C-all-data` (trained on all profiler data, see [../model/results](../model/results/C-all-data/report.md)).
+Model `D-no-job-sizes`: trained on single-operator profiler data **without any 100k or 1M-row configs**, so every
+operator in these jobs is at an input size the model never saw ([report](../model/results/D-no-job-sizes/report.md)).
+With the model trained on all data (`C-all-data`) the overall result is 1.29 instead of 1.31.
 Full table: [results/job_comparison.md](results/job_comparison.md); charts: [results/charts/](results/charts/).
 Median q-error over jobs (max(predicted / measured, measured / predicted), 1 = perfect):
 
 | Placement | Jobs | Wayang | Model (true rows) | Model (Wayang rows) | Model closer than Wayang |
 |---|---|---|---|---|---|
-| java | 10 | 4.51 | **1.13** | 1.21 | 10 of 10 |
-| spark | 10 | 2.08 | **1.29** | 1.47 | 7 of 10 |
-| mixed | 10 | **1.61** | 2.04 | 2.04 | 5 of 10 |
-| all | 30 | 2.69 | **1.29** | 1.53 | 22 of 30 |
+| java | 10 | 4.51 | **1.15** | 1.28 | 10 of 10 |
+| spark | 10 | 2.08 | **1.30** | 1.39 | 8 of 10 |
+| mixed | 10 | **1.61** | 2.24 | 2.21 | 4 of 10 |
+| all | 30 | 2.69 | **1.31** | 1.39 | 22 of 30 |
 
 - **Java**: Wayang is 3–6× too high on every job; the model is within ~13% (e.g. filter-distinct 1M:
-  measured 133 ms, Wayang 641 ms, model 122 ms).
+  measured 133 ms, Wayang 641 ms, model 124 ms).
 - **Mixed**: almost all of the error is the Spark → Java conversion (`SparkCollectOperator`). Wayang estimates
   it at ~10 ms at any size; measured gaps are 0.1–1.1 s at 1M rows (flatmap-count 1M: 1,209 ms measured,
   Wayang 121 ms). The model uses Wayang's estimate for conversions, so it inherits this error. Profiling
   conversions is the next step.
 - **Wayang's row counts** are rough (e.g. it assumes a filter keeps 10% of rows; it kept 50%), which costs
-  the model 1.29 → 1.53 when it has to use them.
+  the model 1.31 → 1.39 when it has to use them.
+- Only runtime is compared for jobs. The jobs record wall time only, not CPU or memory.
 
 ![Job runtime](results/charts/jobs_runtime.png)
 
@@ -54,7 +57,7 @@ Median q-error over jobs (max(predicted / measured, measured / predicted), 1 = p
 
 ```bash
 ./run-jobs.sh                                           # ~10 min; writes results/job_*.csv
-../model/.venv/bin/python evaluate_jobs.py              # newest model in ../model/runs -> results/job_comparison.md
+../model/.venv/bin/python evaluate_jobs.py --model ../model/runs/D-no-job-sizes/model.pt   # -> results/job_comparison.md
 ../model/.venv/bin/python make_charts.py --report ../model/runs/<time>/metrics.json   # results/charts/*.png
 ```
 

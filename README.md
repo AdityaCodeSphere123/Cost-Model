@@ -157,17 +157,21 @@ estimates. q-error = max(predicted / measured, measured / predicted): how many t
 | Runtime on 1M-row inputs, trained only on ≤ 300k rows | 4.27 | **1.44** |
 
 **Whole multi-operator jobs** (5 jobs × 2 sizes × Java / Spark / mixed = 30 jobs, measured runtime vs
-predicted; [job-eval/](job-eval/README.md)):
+predicted; [job-eval/](job-eval/README.md)). Training only had single-operator plans, and for this test the
+model was trained **without any 100k or 1M-row configs** (the jobs' input sizes), so every operator in every
+job is at an input size it has never seen ([D-no-job-sizes](model/results/D-no-job-sizes/report.md)):
 
 | Placement | Wayang | Cost model | Model closer |
 |---|---|---|---|
-| Java only | 4.51 | **1.13** | 10 of 10 |
-| Spark only | 2.08 | **1.29** | 7 of 10 |
-| Mixed (Spark scan, Java rest) | **1.61** | 2.04 | 5 of 10 |
-| All 30 jobs | 2.69 | **1.29** | 22 of 30 |
+| Java only | 4.51 | **1.15** | 10 of 10 |
+| Spark only | 2.08 | **1.30** | 8 of 10 |
+| Mixed (Spark scan, Java rest) | **1.61** | 2.24 | 4 of 10 |
+| All 30 jobs | 2.69 | **1.31** | 22 of 30 |
 
 With Wayang's own row-count estimates instead of the real ones (what the model gets inside Wayang), the model
-scores 1.53 over all jobs. Mixed jobs are its weak spot because the Spark → Java conversion (`SparkCollect`)
+scores 1.39 over all jobs. A model trained on all data (including the job sizes) scores 1.29, so seeing the
+job sizes barely matters. Only the runtime of jobs is compared; per-resource comparisons with measured CPU and
+memory are for single operators (table above). Mixed jobs are its weak spot because the Spark → Java conversion (`SparkCollect`)
 is not profiled yet: Wayang estimates it at ~10 ms at any size, while the measured gap is 0.1–1.1 s at 1M rows.
 
 ### `java-profiler/data/` (inputs, shared by both profilers)

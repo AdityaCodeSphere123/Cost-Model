@@ -156,6 +156,33 @@ Spark-specific points:
 - `./run-profiling.sh --add-estimates` uses `shuffle_partitions / 2` as the cores of each config, so old rows
   get exactly the estimate a new run would write. It runs only Wayang's optimizer, not Spark.
 
+## Checking the profiler itself
+
+Two test operators (not part of the training grid) check that the CPU counters only count work, not waiting:
+
+- `burn`: a fixed amount of pure CPU work per row (`--work` = loop rounds). Its true cost is calibrated on the
+  driver thread and stored as `burn_calibrated_ns_per_row`.
+- `sleep`: waits `--work` microseconds per row without using the CPU.
+
+```bash
+# same JVM flags and classpath as run-profiling.sh uses
+java ... wayangprof.SparkOperatorProfiler --op burn  --rows 100000 --work 10000 ...
+java ... wayangprof.SparkOperatorProfiler --op sleep --rows 10000  --work 100   ...
+```
+
+Result on the M4 Pro (8 Nov 2026, 2 warm-up + 5 pairs, operator − baseline):
+
+| | burn (expected 1,354 ms CPU) | sleep (1,000 ms of waiting) |
+|---|---|---|
+| `task_cpu_ns` | 1,393 ms (103%) | 59 ms (the park/unpark calls themselves) |
+| `task_run_ms` | 1,394 ms | 1,325 ms (waiting counts as run time) |
+| `process_cpu_exec_ns` | 1,406 ms | 78 ms |
+| `wall_exec_ns` | 698 ms (2 input partitions, so 2 tasks in parallel) | 662 ms |
+| `os_cycles` | 6.10 G | 0.15 G |
+| `os_energy_nj` | 3.56 J | 0.05 J |
+
+So CPU, cycles and energy follow the work, and waiting shows up only in run time and wall time.
+
 ## Notes
 
 - **Cheap operators are within noise.** Filter, map, union and count on small inputs cost less than the

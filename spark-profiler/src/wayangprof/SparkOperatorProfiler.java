@@ -127,6 +127,10 @@ public final class SparkOperatorProfiler {
 
     static {
         NAMES.put("map", new String[]{"MapOperator", "SparkMapOperator"});
+        // Test operators for checking the profiler itself (not in the training grid), see --work:
+        // burn = fixed CPU work per row, sleep = idle wait per row (no CPU).
+        NAMES.put("burn", new String[]{"MapOperator", "SparkMapOperator"});
+        NAMES.put("sleep", new String[]{"MapOperator", "SparkMapOperator"});
         NAMES.put("filter", new String[]{"FilterOperator", "SparkFilterOperator"});
         NAMES.put("flatmap", new String[]{"FlatMapOperator", "SparkFlatMapOperator"});
         NAMES.put("reduceby", new String[]{"ReduceByOperator", "SparkReduceByOperator"});
@@ -673,6 +677,7 @@ public final class SparkOperatorProfiler {
         String resource = "default";
         String tag = "";
         boolean estimateOnly = false;    // only write Wayang's estimates for both plans to --out, run nothing
+        long work = 1000;                // test operators: burn = loop iterations per row, sleep = microseconds per row
 
         boolean binary() {
             return BINARY.contains(this.op);
@@ -717,6 +722,7 @@ public final class SparkOperatorProfiler {
                 case "--resource": c.resource = v; i++; break;
                 case "--tag": c.tag = v; i++; break;
                 case "--estimate-only": c.estimateOnly = true; break;
+                case "--work": c.work = Long.parseLong(v); i++; break;
                 case "-h": case "--help": usage(); System.exit(0); break;
                 default: System.err.println("Unknown argument: " + a); usage(); System.exit(2);
             }
@@ -787,6 +793,20 @@ public final class SparkOperatorProfiler {
         switch (c.op) {
             case "map":
                 return new MapOperator<Row, Row>(r -> new Row(r.id, r.key, r.value * 1.0001 + 1.0, r.text), Row.class, Row.class);
+            case "burn": {
+                final long n = c.work;
+                return new MapOperator<Row, Row>(r -> {
+                    burn(n);
+                    return r;
+                }, Row.class, Row.class);
+            }
+            case "sleep": {
+                final long us = c.work;
+                return new MapOperator<Row, Row>(r -> {
+                    java.util.concurrent.locks.LockSupport.parkNanos(us * 1000);
+                    return r;
+                }, Row.class, Row.class);
+            }
             case "filter": {
                 final int threshold = (int) Math.round(c.sel * c.keys); // keys are uniform in [0, keys)
                 return new FilterOperator<Row>(r -> r.key < threshold, Row.class);
@@ -814,6 +834,27 @@ public final class SparkOperatorProfiler {
             default:
                 throw new IllegalArgumentException(c.op);
         }
+    }
+
+    static volatile long BURN_SINK;
+
+    /** Pure CPU work: n rounds of xorshift, no allocation, no memory traffic. */
+    static void burn(long n) {
+        long x = 88172645463325252L;
+        for (long i = 0; i < n; i++) {
+            x ^= x << 13;
+            x ^= x >>> 7;
+            x ^= x << 17;
+        }
+        BURN_SINK = x;
+    }
+
+    /** CPU nanoseconds of one burn(n), measured on this thread after warm-up: the expected cost per row. */
+    static double burnCalibration(long n) {
+        for (int i = 0; i < 20_000; i++) burn(n);
+        long c0 = TMX.getCurrentThreadCpuTime();
+        for (int i = 0; i < 20_000; i++) burn(n);
+        return (TMX.getCurrentThreadCpuTime() - c0) / 20_000.0;
     }
 
     static Operator binaryOperator(Cfg c) {
@@ -1347,6 +1388,8 @@ public final class SparkOperatorProfiler {
         env.put("right_in_partitions", rightPartitions);
         env.put("serializer", jsc.getConf().get("spark.serializer", "org.apache.spark.serializer.JavaSerializer"));
         env.put("os_probe", os.kind());
+        if (c.op.equals("burn")) env.put("burn_calibrated_ns_per_row", burnCalibration(c.work));
+        if (c.op.equals("burn") || c.op.equals("sleep")) env.put("work", c.work);
 
         System.err.printf("[wayangprof] %s  master=%s  spark=%s  warmup=%d reps=%d  os_probe=%s  measured=%s%n",
                 c.configId(), jsc.master(), jsc.version(), c.warmup, c.reps, os.kind(), measured);

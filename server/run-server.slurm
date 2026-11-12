@@ -10,4 +10,5 @@
 # module load java/17        # uncomment / adapt if the cluster provides Java as a module
 cd "$SLURM_SUBMIT_DIR"
 # Stop starting new configs 30 minutes before the job's time limit, so the last one can finish.
+# Add --postgres local to include PostgreSQL (needs PostgreSQL installed on the node: ./setup-vm.sh).
 ./run-server.sh --hours 47.5

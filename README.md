@@ -1,6 +1,6 @@
 # Cost-Model
 
-Measured resource usage of Apache Wayang operators on two platforms, **Java** and **Spark**, collected as
+Measured resource usage of Apache Wayang operators on three platforms, **Java**, **Spark** and **PostgreSQL**, collected as
 training data for an ML cost model. All measured numbers are real measurements from running the operators.
 Next to them, every row also holds **Wayang's own estimate** for the same plan (`wayang_est_*` columns: CPU
 cycles, disk, network, RAM, time, cost), so the measured cost can be compared with what Wayang predicts.
@@ -16,7 +16,8 @@ operator cost = operator run - baseline run   (per pair, then median over pairs)
 | Profiler | Platform | Details |
 |---|---|---|
 | [java-profiler](java-profiler/README.md) | Wayang Java platform: one thread in one JVM | |
-| [spark-profiler](spark-profiler/README.md) | Wayang Spark platform (Spark 3.5.7) in local mode: a **single-node cluster**, driver and executor in one JVM, one task thread per core | adds Spark task metrics: executor CPU, shuffle bytes, spill, peak execution memory |
+| [spark-profiler](spark-profiler/README.md) | Wayang Spark platform (Spark 3.5.7) in local mode: a **single-node cluster**, driver and executor in one JVM, one task thread per core; or a standalone cluster of N executors | adds Spark task metrics: executor CPU, shuffle bytes, spill, peak execution memory |
+| [postgres-profiler](postgres-profiler/README.md) | Wayang PostgreSQL platform: filter, projection, join, global reduce, table sink, and the Postgres -> Java hand-off (`SqlToStream`) | Postgres operators become one SQL statement: measures connections, query, bytes on the wire, database CPU (Linux), EXPLAIN ANALYZE |
 
 ## File structure
 
@@ -44,6 +45,13 @@ Cost-Model/
 │   └── results/                   reports of the trained models (held-out q-errors vs Wayang)
 ├── job-eval/                      multi-operator jobs: measured vs Wayang vs model (see job-eval/README.md)
 │   └── results/                   job_comparison.md / .csv, raw job runs, charts/*.png
+├── postgres-profiler/
+│   ├── README.md                  how Wayang runs Postgres, plans, measured columns
+│   ├── start-local-postgres.sh    starts a PostgreSQL server used only for profiling (127.0.0.1:5433)
+│   ├── run-profiling.sh           runs the profiler over a grid of configs (start here)
+│   ├── analyze.py                 same analysis, with Postgres columns
+│   └── src/wayangprof/
+│       └── PostgresOperatorProfiler.java  the profiler: tables, traced JDBC driver, /proc and EXPLAIN probes
 └── spark-profiler/
     ├── README.md                  single-node cluster setup, method, Spark-specific columns
     ├── run-profiling.sh           runs the profiler over a grid of configs (start here)

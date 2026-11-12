@@ -117,6 +117,11 @@ case "$(uname -m)" in x86_64|amd64) ARCH=x64 ;; aarch64|arm64) ARCH=aarch64 ;; *
 if [[ "$(uname -s)" == Linux && -x "$BUNDLE/jdk/linux-$ARCH/bin/java" && -z "${USE_SYSTEM_JAVA:-}" ]]; then
   export JAVA_HOME="$BUNDLE/jdk/linux-$ARCH"
 fi
+if [[ -z "${JAVA_HOME:-}" ]]; then  # no bundled JDK: the Java 17 that setup-vm.sh installed
+  for d in /usr/lib/jvm/java-17-openjdk* /usr/lib/jvm/java-17 /usr/lib/jvm/temurin-17*; do
+    [[ -x "$d/bin/javac" ]] && { export JAVA_HOME="$d"; break; }
+  done
+fi
 if [[ -z "${JAVA_HOME:-}" && -d /opt/homebrew/opt/openjdk@17/libexec/openjdk.jdk/Contents/Home ]]; then
   export JAVA_HOME=/opt/homebrew/opt/openjdk@17/libexec/openjdk.jdk/Contents/Home
 fi
@@ -140,7 +145,16 @@ make_spark_home() {
   elif [[ -s "$REPO/spark-profiler/build/spark-classpath.txt" ]]; then
     IFS=: read -r -a jars <"$REPO/spark-profiler/build/spark-classpath.txt"
   else
-    fail "Spark jars not found: run ../spark-profiler/run-profiling.sh once (it saves the Spark classpath), or use the bundle"
+    # The Spark that setup-vm.sh installed: driver, master, workers and executors all use its jars.
+    local sh
+    for sh in "${SPARK_HOME:-}" /opt/spark; do
+      if [[ -n "$sh" && -d "$sh/jars" ]]; then
+        export SPARK_JARS="$sh/jars/*"
+        jars=("$sh"/jars/*.jar)
+        break
+      fi
+    done
+    (( ${#jars[@]} > 0 )) || fail "Spark jars not found: run ./setup-vm.sh (installs Spark), or use the bundle"
   fi
   rm -rf "$SPARK_HOME_DIR"
   mkdir -p "$SPARK_HOME_DIR/jars" "$SPARK_HOME_DIR/conf"

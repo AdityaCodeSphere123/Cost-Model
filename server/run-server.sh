@@ -24,6 +24,8 @@ REPS=5
 SEED=1
 OUT="$REPO/results-server"
 CHECK=0
+PG_URL=""          # --postgres: also profile Wayang's PostgreSQL platform (needs a running server)
+PG_USER="${PGUSER:-$(id -un)}"
 ANALYZE_EVERY=10
 CORES=""
 MEM_GB=""
@@ -41,6 +43,10 @@ Options
   --mem-gb N       RAM to plan for (default: all of this machine)
   --out DIR        output folder (default $OUT)
   --check          only test that everything works
+  --postgres URL   also profile the PostgreSQL platform, e.g. postgresql://127.0.0.1:5433/wayangprof
+  --postgres local the same with this machine's dedicated profiling server, started if needed
+                   (../postgres-profiler/start-local-postgres.sh; install PostgreSQL first: ./setup-vm.sh)
+  --pg-user U      database user (default: \$PGUSER or the OS user; password from \$PGPASSWORD)
 EOF
 }
 
@@ -55,6 +61,8 @@ while [[ $# -gt 0 ]]; do
     --mem-gb) MEM_GB="$2"; shift 2 ;;
     --out) OUT="$2"; shift 2 ;;
     --check) CHECK=1; shift ;;
+    --postgres) PG_URL="$2"; shift 2 ;;
+    --pg-user) PG_USER="$2"; shift 2 ;;
     -h|--help) usage; exit 0 ;;
     *) echo "Unknown option: $1"; usage; exit 2 ;;
   esac
@@ -79,7 +87,13 @@ if [[ -z "$MEM_GB" ]]; then
 fi
 # The bundle (make-bundle.sh) ships Wayang and Spark next to Cost-Model/; in the repo the usual paths are used.
 if [[ -d "$BUNDLE/wayang/jars" ]]; then export WAYANG_HOME="$BUNDLE/wayang"; fi
-if [[ -d "$BUNDLE/spark-jars" ]]; then export SPARK_JARS="$BUNDLE/spark-jars/*"; fi
+if [[ -d "$BUNDLE/spark-jars" ]]; then export SPARK_JARS="$BUNDLE/spark-jars/*"
+elif [[ -z "${SPARK_JARS:-}" && ! -s "$REPO/spark-profiler/build/spark-classpath.txt" ]]; then
+  # No bundled jars and no Maven classpath: the Spark that setup-vm.sh installed (/opt/spark).
+  for sh in "${SPARK_HOME:-}" /opt/spark; do
+    [[ -n "$sh" && -d "$sh/jars" ]] && { export SPARK_JARS="$sh/jars/*"; break; }
+  done
+fi
 
 fail() { say "ERROR: $*"; exit 1; }
 # Prefer the JDK shipped in the bundle (make-bundle.sh --with-jdk): the same Java everywhere, nothing to install.
@@ -87,8 +101,13 @@ case "$(uname -m)" in x86_64|amd64) ARCH=x64 ;; aarch64|arm64) ARCH=aarch64 ;; *
 if [[ "$(uname -s)" == Linux && -x "$BUNDLE/jdk/linux-$ARCH/bin/java" && -z "${USE_SYSTEM_JAVA:-}" ]]; then
   export JAVA_HOME="$BUNDLE/jdk/linux-$ARCH"
 fi
+if [[ -z "${JAVA_HOME:-}" ]]; then  # no bundled JDK: the Java 17 that setup-vm.sh installed
+  for d in /usr/lib/jvm/java-17-openjdk* /usr/lib/jvm/java-17 /usr/lib/jvm/temurin-17*; do
+    [[ -x "$d/bin/javac" ]] && { export JAVA_HOME="$d"; break; }
+  done
+fi
 JAVA="${JAVA_HOME:+$JAVA_HOME/bin/}java"
-command -v "$JAVA" >/dev/null || fail "java not found (install Java 17 or set JAVA_HOME)"
+command -v "$JAVA" >/dev/null || fail "java not found (run ./setup-vm.sh, or set JAVA_HOME)"
 JV=$("$JAVA" -version 2>&1 | head -1 | sed -E 's/.*version "([0-9]+).*/\1/')
 (( JV >= 17 )) || say "WARNING: Java $JV found; Java 17 is what the data so far was measured with"
 command -v "${JAVA_HOME:+$JAVA_HOME/bin/}javac" >/dev/null || fail "javac not found (install a JDK, not only a JRE)"
@@ -120,9 +139,22 @@ PY
   say "CPU: $(lscpu 2>/dev/null | grep -m1 'Model name' | cut -d: -f2 | sed 's/^ *//')"
 }
 
+if [[ "$PG_URL" == local ]]; then
+  # The dedicated server (127.0.0.1, autovacuum off, owned by this user so its CPU can be read), started if needed.
+  PG_URL=$("$REPO/postgres-profiler/start-local-postgres.sh" url 2>>"$LOG") \
+    || fail "could not start the local PostgreSQL server (install it with ./setup-vm.sh; log: $REPO/postgres-profiler/pgdata/server.log)"
+  PG_USER=$(id -un)
+  say "PostgreSQL: local profiling server at $PG_URL"
+fi
+PLATFORMS="java spark"
+[[ -n "$PG_URL" ]] && PLATFORMS="java spark postgres"
+pg_args() { [[ "$1" == postgres ]] && echo "--url $PG_URL --user $PG_USER"; }
+raw_files() { local p; for p in $PLATFORMS; do [[ -s "$OUT/$p/raw.csv" ]] && echo "$OUT/$p/raw.csv"; done; }
+
 run_platform() {  # platform config-list hours extra-args...
   local p="$1" list="$2" hours="$3"; shift 3
-  "$REPO/$p-profiler/run-profiling.sh" --config-list "$list" --hours "$hours" --warmup "$WARMUP" --reps "$REPS" \
+  # shellcheck disable=SC2046
+  "$REPO/$p-profiler/run-profiling.sh" $(pg_args "$p") --config-list "$list" --hours "$hours" --warmup "$WARMUP" --reps "$REPS" \
     --out "$OUT/$p" --data-dir "$OUT/data" --ephemeral-inputs --no-analyze --tag server --timeout 1800 "$@" \
     >>"$OUT/$p-runner.log" 2>&1
 }
@@ -180,15 +212,46 @@ for p, need in (("java", ["thread_cpu_exec_ns", "mem_held_bytes", "wayang_est_ti
     print(f"  {p:5} self-test sleep: CPU {sleep/1e6:.0f} ms during {waited/1e6:.0f} ms of waiting = {share:.0%}  {'ok' if good else 'FAIL (should be < 15%)'}")
 print("CHECK PASSED" if ok else "CHECK FAILED")
 PY
-  "$PYTHON" "$HERE/validate_data.py" "$C/java/raw.csv" "$C/spark/raw.csv" | tee -a "$LOG"
+  if [[ -n "$PG_URL" ]]; then
+    say "check: postgres ($PG_URL): a filter and an aggregate config"
+    printf '%s\n' "2g:G1:p0|filter|table|100000|0|1000|0.1|8" "2g:G1:p0|globalreduce|table|300000|0|1000|0.5|8" >"$C/pg.list"
+    # shellcheck disable=SC2046
+    "$REPO/postgres-profiler/run-profiling.sh" $(pg_args postgres) --config-list "$C/pg.list" --warmup 1 --reps 3 \
+      --out "$C/postgres" --data-dir "$C/data" --ephemeral-inputs --tag check >"$C/postgres.log" 2>&1 \
+      || { tail -20 "$C/postgres.log"; fail "postgres check failed (log: $C/postgres.log)"; }
+    "$PYTHON" - "$C/postgres/raw.csv" <<'PY2' | tee -a "$LOG"
+import csv, statistics, sys
+rows = list(csv.DictReader(open(sys.argv[1])))
+ok = True
+def flag(good, text):
+    global ok
+    ok &= bool(good)
+    print(f"  {'ok  ' if good else 'FAIL'}  postgres {text}")
+flag(all(r.get("network_bytes_in") not in ("", "0") for r in rows if r["out_rows"] not in ("0",)), "socket bytes counted (network_bytes_in > 0)")
+flag(all(r.get("db_explain_exec_ms") for r in rows), "EXPLAIN ANALYZE read (db_explain_exec_ms)")
+flt = [r for r in rows if r["operator"] == "filter" and r["plan"] == "operator"]
+flag(all(abs(float(r["out_rows"]) - 10000) < 500 for r in flt), f"filter sel 0.1 of 100k rows: out_rows {sorted({r['out_rows'] for r in flt})}")
+if rows[0].get("db_local") == "1":
+    agg = [r for r in rows if r["operator"] == "globalreduce" and r["plan"] == "operator"]
+    cpu = statistics.median(float(r["db_cpu_ns"]) / 1e6 for r in agg)
+    ex = statistics.median(float(r["db_explain_exec_ms"]) for r in agg)
+    # SUM over 300k cached rows is CPU-bound on one server process: its CPU should be close to the server's execution time
+    flag(0.5 * ex <= cpu <= 2.0 * ex + 30, f"database CPU {cpu:.0f} ms vs server execution time {ex:.0f} ms (SUM over 300k rows)")
+else:
+    print("  skip  postgres database CPU: the database is not on this machine or /proc is not readable (db_local = 0)")
+print("POSTGRES CHECK PASSED" if ok else "POSTGRES CHECK FAILED")
+PY2
+  fi
+  # shellcheck disable=SC2046
+  "$PYTHON" "$HERE/validate_data.py" "$C/java/raw.csv" "$C/spark/raw.csv" $([[ -n "$PG_URL" ]] && echo "$C/postgres/raw.csv") | tee -a "$LOG"
   rm -rf "$C/data"
   exit 0
 fi
 
 # ---- the long run ------------------------------------------------------------------------------
-for p in java spark; do
+for p in $PLATFORMS; do
   if [[ ! -s "$OUT/$p.list" ]]; then
-    seed=$(( SEED * 2 )); [[ $p == spark ]] && seed=$(( SEED * 2 + 1 ))
+    seed=$(( SEED * 2 )); [[ $p == spark ]] && seed=$(( SEED * 2 + 1 )); [[ $p == postgres ]] && seed=$(( SEED * 2 + 1000 ))
     "$PYTHON" "$HERE/sweep.py" --platform "$p" --cores "$CORES" --mem-gb "$MEM_GB" --count 80000 --seed "$seed" \
       >"$OUT/$p.list" 2>>"$LOG"
   fi
@@ -202,7 +265,7 @@ ROUND=0
 while (( $(date +%s) < DEADLINE )); do
   ROUND=$((ROUND + 1))
   ran=0
-  for p in java spark; do
+  for p in $PLATFORMS; do
     left=$(( DEADLINE - $(date +%s) )); (( left > 0 )) || break
     chunk="$OUT/$p.chunk"
     "$PYTHON" "$HERE/next_chunk.py" "$OUT/$p.list" "$OUT/$p/.done_ids" "$OUT/$p/run.log" "$CHUNK" >"$chunk"
@@ -217,14 +280,16 @@ while (( $(date +%s) < DEADLINE )); do
   done
   (( ran )) || { say "all configs in the lists are done"; break; }
   if (( ROUND % ANALYZE_EVERY == 0 )); then
-    for p in java spark; do "$PYTHON" "$REPO/$p-profiler/analyze.py" "$OUT/$p/raw.csv" --out "$OUT/$p" --quiet >>"$LOG" 2>&1; done
-    "$PYTHON" "$HERE/validate_data.py" "$OUT/java/raw.csv" "$OUT/spark/raw.csv" >"$OUT/validation.txt" 2>&1 \
+    for p in $PLATFORMS; do [[ -s "$OUT/$p/raw.csv" ]] && "$PYTHON" "$REPO/$p-profiler/analyze.py" "$OUT/$p/raw.csv" --out "$OUT/$p" --quiet >>"$LOG" 2>&1; done
+    # shellcheck disable=SC2046
+    "$PYTHON" "$HERE/validate_data.py" $(raw_files) >"$OUT/validation.txt" 2>&1 \
       || say "WARNING: data validation found errors, see $OUT/validation.txt"
   fi
 done
 
-for p in java spark; do
+for p in $PLATFORMS; do
   [[ -s "$OUT/$p/raw.csv" ]] && "$PYTHON" "$REPO/$p-profiler/analyze.py" "$OUT/$p/raw.csv" --out "$OUT/$p" --quiet 2>&1 | tee -a "$LOG"
 done
-"$PYTHON" "$HERE/validate_data.py" "$OUT/java/raw.csv" "$OUT/spark/raw.csv" 2>&1 | tee "$OUT/validation.txt" | tee -a "$LOG"
-say "finished after $(( ($(date +%s) - START) / 3600 )) h. Data: $OUT/java and $OUT/spark"
+# shellcheck disable=SC2046
+"$PYTHON" "$HERE/validate_data.py" $(raw_files) 2>&1 | tee "$OUT/validation.txt" | tee -a "$LOG"
+say "finished after $(( ($(date +%s) - START) / 3600 )) h. Data: $(for p in $PLATFORMS; do printf '%s ' "$OUT/$p"; done)"

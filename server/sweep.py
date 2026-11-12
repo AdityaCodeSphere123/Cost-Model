@@ -4,6 +4,7 @@
     python3 sweep.py --platform java  --cores 32 --mem-gb 128 --count 60000 --seed 1 > java.list
     python3 sweep.py --platform spark --cores 32 --mem-gb 128 --count 60000 --seed 2 > spark.list
     python3 sweep.py --platform spark-cluster --shapes "1x6 2x6 4x6" --executor-memory-gb 6 --count 5000 > cluster.list
+    python3 sweep.py --platform postgres --cores 32 --mem-gb 128 --count 20000 --seed 5 > postgres.list
 
 Each line: HEAP:GC:CPUS|op|source|rows|right_rows|keys|sel|words. The list is in random order, so a run that
 stops early (time limit, crash) still covers the whole space evenly. Values are taken on log scales because
@@ -21,6 +22,10 @@ spark-cluster: every data config is written once per cluster shape (NxC = N exec
 other in random shape order, so all shapes are measured on the same configs and any prefix of the list is
 balanced across shapes. --count is the number of data configs (lines = count x shapes). Lines look like
 DRIVERHEAP:G1:NxC|op|...; heap checks use the executor memory, since the executors hold the data.
+
+postgres: Wayang's Postgres operators (filter, projection, join, globalreduce, tablesink, sqltostream). Lines look like
+HEAP:GC:pN[i]|op|table|rows|right_rows|keys|sel|words: N = parallel query workers per Gather (0, 2, 4), i = index on
+the key column. Main setting p0 without index (~60%); the JVM heap only matters for the Java side and stays fixed.
 """
 import argparse
 import random
@@ -91,6 +96,46 @@ def sample_data(rng, op, heap):
     return f"{op}|{source}|{rows}|{right}|{keys}|{sel}|{words}"
 
 
+PG_OPS = ["filter", "projection", "join", "globalreduce", "tablesink", "sqltostream"]
+
+
+def postgres_sample(rng, op, main, others, p_main=0.6):
+    res = main if rng.random() < p_main else rng.choice(others)
+    rows = rng.choice(ROW_LEVELS)
+    right, keys, sel, words = 0, 1000, 0.5, rng.choice([2, 8, 8, 32])
+    if op == "filter":
+        sel = rng.choice([0.001, 0.005, 0.01] + [round(i * 0.05, 2) for i in range(1, 21)])
+    elif op in ("projection", "sqltostream"):
+        words = rng.choice([1, 2, 4, 8, 16, 32, 64])  # row width: bytes sent to Java
+    elif op == "join":
+        right = rng.choice([r for r in ROW_LEVELS if rows / 10 <= r <= rows * 10])
+        keys = max(1, rows // rng.choice([1, 2, 10, 100]))
+        if rows * right / keys > MAX_OUT:
+            return None
+    return f"{res}|{op}|table|{rows}|{right}|{keys}|{sel}|{words}"
+
+
+def postgres_list(rng, cores, mem_gb, count):
+    heap = "4g" if mem_gb >= 16 else "2g"
+    main = f"{heap}:G1:p0"
+    others = [f"{heap}:G1:p{n}{i}" for n in (0, 2, 4) if n <= cores for i in ("", "i") if f"p{n}{i}" != "p0"]
+    seen, out = set(), []
+    while len(out) < count:
+        before = len(out)
+        for op in rng.sample(PG_OPS, len(PG_OPS)):
+            for attempt in range(300):
+                c = postgres_sample(rng, op, main, others, 0.6 if attempt < 100 else 0.0)
+                if c and c not in seen:
+                    seen.add(c)
+                    out.append(c)
+                    break
+            if len(out) >= count:
+                break
+        if len(out) == before:
+            break
+    return out
+
+
 def cluster_list(rng, shapes, driver_heap, exec_heap, count):
     """count data configs, each once per shape (shape order shuffled per config), operators round-robin."""
     seen, out = set(), []
@@ -112,7 +157,7 @@ def cluster_list(rng, shapes, driver_heap, exec_heap, count):
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--platform", choices=["java", "spark", "spark-cluster"], required=True)
+    ap.add_argument("--platform", choices=["java", "spark", "spark-cluster", "postgres"], required=True)
     ap.add_argument("--cores", type=int, help="cores of the server (java, spark)")
     ap.add_argument("--mem-gb", type=int, help="RAM of the server in GB (java, spark)")
     ap.add_argument("--count", type=int, default=60000)
@@ -132,6 +177,11 @@ def main():
         return
     if args.cores is None or args.mem_gb is None:
         ap.error("--cores and --mem-gb are needed")
+    if args.platform == "postgres":
+        out = postgres_list(rng, args.cores, args.mem_gb, args.count)
+        print(f"# postgres: {len(out)} configs, seed {args.seed}", file=sys.stderr)
+        print("\n".join(out))
+        return
     main_res, others = settings(args.platform, args.cores, args.mem_gb)
     seen, out = set(), []
     # Operators round-robin (reshuffled each round), so every prefix of the list is balanced across

@@ -7,7 +7,8 @@
 #   ./make-bundle.sh --jdk none      no JDK: the server must have Java 17
 #
 # Contents: the Wayang distribution (without jars the profilers never load), the Spark 3.5 jars, a Java 17 JDK
-# (Eclipse Temurin, checksum-verified), both profilers, this server/ folder and the model code. No measured data:
+# (Eclipse Temurin, checksum-verified), the Java, Spark and PostgreSQL profilers, this server/ folder and the model
+# code. PostgreSQL itself is not included (postgres-profiler/start-local-postgres.sh uses the server's binaries). No measured data:
 # the server starts with empty results.
 set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -72,12 +73,15 @@ esac
 
 echo "Code"
 mkdir -p "$B/Cost-Model"
-for p in java-profiler spark-profiler; do
-  mkdir -p "$B/Cost-Model/$p/src" "$B/Cost-Model/$p/native"
+for p in java-profiler spark-profiler postgres-profiler; do
+  mkdir -p "$B/Cost-Model/$p/src"
   cp -R "$REPO/$p/src/wayangprof" "$B/Cost-Model/$p/src/"
-  cp "$REPO/$p/native/pidrusage.c" "$B/Cost-Model/$p/native/"
-  cp "$REPO/$p/run-profiling.sh" "$REPO/$p/analyze.py" "$REPO/$p/wayang_estimates.py" "$REPO/$p/log4j2-quiet.xml" \
-     "$REPO/$p/README.md" "$B/Cost-Model/$p/"
+  if [[ -f "$REPO/$p/native/pidrusage.c" ]]; then
+    mkdir -p "$B/Cost-Model/$p/native" && cp "$REPO/$p/native/pidrusage.c" "$B/Cost-Model/$p/native/"
+  fi
+  for f in run-profiling.sh analyze.py wayang_estimates.py log4j2-quiet.xml README.md start-local-postgres.sh; do
+    [[ -f "$REPO/$p/$f" ]] && cp "$REPO/$p/$f" "$B/Cost-Model/$p/"
+  done
 done
 mkdir -p "$B/Cost-Model/server" "$B/Cost-Model/model"
 cp "$HERE"/*.sh "$HERE"/*.py "$HERE"/*.md "$HERE"/*.slurm "$B/Cost-Model/server/" 2>/dev/null || true
@@ -88,4 +92,4 @@ echo "Archive"
 tar -C "$OUT" -czf "$OUT/cost-model-server.tar.gz" cost-model-server
 du -sh "$B" "$OUT/cost-model-server.tar.gz"
 echo "Copy to the server:  scp $OUT/cost-model-server.tar.gz user@server:"
-echo "Then on the server:  tar xzf cost-model-server.tar.gz && cd cost-model-server/Cost-Model/server && ./run-server.sh --check"
+echo "Then on the server:  tar xzf cost-model-server.tar.gz && cd cost-model-server/Cost-Model/server && ./setup-vm.sh && ./run-server.sh --check --postgres local"

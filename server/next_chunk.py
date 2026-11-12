@@ -16,7 +16,8 @@ def config_id(line):
     heap, gc, cpus = res.split(":")
     rr = right if op in ("join", "union", "cartesian") else "0"
     s = sel if op == "filter" else "-"
-    return f"heap{heap}-{gc}-cpu{cpus}|{op}|{src}|r{rows}|rr{rr}|k{keys}|s{s}|w{words}"
+    label = f"heap{heap}-{gc}-{cpus}" if cpus.startswith("p") else f"heap{heap}-{gc}-cpu{cpus}"  # postgres: pN[i]
+    return f"{label}|{op}|{src}|r{rows}|rr{rr}|k{keys}|s{s}|w{words}"
 
 
 def main():

@@ -8,7 +8,8 @@ Spark single-node, alternating, with Wayang's estimate stored next to every meas
 | File | What it does |
 |---|---|
 | `make-bundle.sh` | **on the Mac**: packs Wayang, Spark 3.5, Java 17 for Linux (x64 + ARM, checksum-verified), both profilers and the model code into `dist/cost-model-server.tar.gz` (~1 GB) |
-| `run-server.sh` | **on the server**: `--check` tests everything; without it, runs Java and Spark in turns until the time limit |
+| `setup-vm.sh` | **on the VM, once** (sudo): installs PostgreSQL and tools, starts the profiling database |
+| `run-server.sh` | **on the server**: `--check` tests everything; without it, runs Java, Spark (and with `--postgres local` PostgreSQL) in turns until the time limit |
 | `sweep.py` | random config lists (13 operators, rows 1k–3M, keys, selectivity, words, heap / GC / cores), balanced across operators |
 | `next_chunk.py` | the next unfinished configs of a list (used by `run-server.sh`) |
 | `validate_data.py` | checks the data for impossible or suspicious values (runs automatically) |
@@ -23,30 +24,53 @@ cd Cost-Model/server && ./make-bundle.sh          # --jdk x64 if the VM is Intel
 scp ../dist/cost-model-server.tar.gz user@vm:
 ```
 
-**2. On the VM.** Needs only Linux, `python3` and ~30 GB free disk. Java is in the bundle; no internet, Maven or
-Wayang source needed.
+**2. On the VM** (Linux with sudo; ~30 GB free disk). Java 17, Wayang and Spark are in the bundle.
 ```bash
 tar xzf cost-model-server.tar.gz
 cd cost-model-server/Cost-Model/server
-./run-server.sh --check
+./setup-vm.sh                                   # once, as your normal user: installs Java 17, Spark 3.5.7,
+                                                # PostgreSQL, python3, perl, taskset; starts the profiling database
+./run-server.sh --check --postgres local
 ```
-The check takes about a minute and prints:
+`setup-vm.sh` (internet needed for this step only):
+- installs Java 17 (`openjdk-17-jdk-headless` / `java-17-openjdk-devel`), PostgreSQL and the small tools with
+  `apt-get` or `dnf`;
+- downloads **Apache Spark 3.5.7** (the version Wayang is built against, Scala 2.12, hadoop3 build) from apache.org,
+  checks its SHA-512 and installs it in `/opt/spark-3.5.7`, linked as `/opt/spark`;
+- writes `JAVA_HOME`, `SPARK_HOME` and `PATH` for new logins to `/etc/profile.d/wayang-profiling.sh`
+  (`spark-shell`, `spark-submit` then work);
+- disables the distribution's default PostgreSQL service it just installed (profiling uses its own server), makes the
+  energy counter readable and sets the CPU frequency policy to performance where the VM exposes them;
+- starts the profiling database (127.0.0.1:5433). Safe to run again; `--no-spark` / `--no-java` skip those parts.
+
+Which Java and Spark the runs use: the bundle's Java 17 and Spark jars first (the same jars the profilers were
+tested with); the installed ones when the bundle has none (`make-bundle.sh --jdk none`, or a bundle without
+`spark-jars/`). The `java_version` and `spark_version` columns record what was used.
+
+The check takes about three minutes and prints:
 - a **machine report**: virtualization type, CPU frequency policy, energy counter, and steal time over 5 idle
   seconds (should be ~0%);
 - one small config per platform, and the columns it produced;
 - the **self-test**: a fixed amount of CPU work must be measured as 90–125% of its known cost, and pure waiting
   must cost < 15% CPU, on Java and on Spark;
-- the data validation. It must end with **CHECK PASSED** and **DATA OK**. If not, don't start the run; send
-  the output.
+- the **Postgres check**: bytes on the socket, EXPLAIN, filter output, and the measured database CPU against the
+  server's own execution time;
+- the data validation. It must end with **CHECK PASSED**, **POSTGRES CHECK PASSED** and **DATA OK**. If not, don't
+  start the run; send the output.
+
+Without PostgreSQL, leave out `--postgres local` (Java and Spark only). Another server can be used with
+`--postgres postgresql://HOST:PORT/DB --pg-user U` (database CPU is then measured only if it runs on this machine).
 
 **3. Start the run** in the background, so it keeps going after you log out:
 ```bash
-nohup ./run-server.sh --hours 84 >/dev/null 2>&1 &     # or inside tmux / screen
+nohup ./run-server.sh --hours 84 --postgres local >/dev/null 2>&1 &     # or inside tmux / screen
 ```
-With SLURM instead: `sbatch run-server.slurm` (resubmit it when it ends; it continues).
+Java, Spark and Postgres take turns in chunks. `--postgres local` starts the profiling database if it is not
+running, so restarts need nothing else. With SLURM instead: `sbatch run-server.slurm` (resubmit it when it ends).
 To restart automatically after a VM reboot: `crontab -e` and add
-`@reboot cd ~/cost-model-server/Cost-Model/server && ./run-server.sh --hours 84 >/dev/null 2>&1`
-(the time limit counts from each start).
+`@reboot cd ~/cost-model-server/Cost-Model/server && ./run-server.sh --hours 84 --postgres local >/dev/null 2>&1`
+(the time limit counts from each start; energy counter and CPU policy reset at reboot: run `./setup-vm.sh` again
+when you are logged in, it is safe to repeat).
 
 **4. Watch it:**
 ```bash
@@ -59,7 +83,7 @@ same options continues where it stopped (finished configs are skipped, failed on
 
 **6. Bring the data back** and train:
 ```bash
-rsync -av user@vm:cost-model-server/Cost-Model/results-server/ Cost-Model/results-server/
+rsync -av user@vm:cost-model-server/Cost-Model/results-server/ Cost-Model/results-server/   # java/ spark/ postgres/
 cd Cost-Model/model
 .venv/bin/python train.py --data ../results-server/java/pairs.csv ../results-server/java/baseline_costs.csv \
                                  ../results-server/spark/pairs.csv ../results-server/spark/baseline_costs.csv
@@ -174,3 +198,6 @@ Stop: `pkill -f run-cluster.sh; pkill -f OperatorProfiler` (stops the cluster to
   - Extra warm-up for small configs (until 3M input rows per plan, at most 20 runs / 10 s).
   - `next_chunk.py` prints nothing when a list is finished (before, both runners kept looping until the time limit).
   - `validate_data.py`: cluster network and executor checks, JIT-during-measurement warning.
+  - PostgreSQL profiler (`../postgres-profiler`), `sweep.py --platform postgres`, `run-server.sh --postgres URL`.
+  - `validate_data.py`: Postgres checks; fixed: the Java checks (same thread, thread CPU <= wall) were skipped for
+    data with the new JIT columns.

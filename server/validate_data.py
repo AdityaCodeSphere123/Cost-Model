@@ -29,7 +29,8 @@ def check_file(path):
         print(f"{path}: no rows")
         return True
     spark = "spark_execution_operator" in rows[0]
-    name = "spark" if spark else "java"
+    postgres = "postgres_execution_operator" in rows[0]
+    name = "spark" if spark else "postgres" if postgres else "java"
     results = []  # (level, description, failing, total)
 
     def check(level, desc, rs, bad):
@@ -39,7 +40,10 @@ def check_file(path):
     f = num
     check("ERROR", "no first-row marker (wall_exec_ns empty)", rows, lambda r: r.get("wall_exec_ns", "") == "")
     check("ERROR", "wall_exec_ns > wall_total_ns", rows, lambda r: f(r["wall_exec_ns"]) > f(r["wall_total_ns"]))
-    text_base = [r for r in rows if r["plan"] == "baseline" and r["source"] == "text"]
+    # Baselines that read every input row into the sink (Postgres: SELECT * FROM t; not the sqltostream baseline,
+    # which sends one aggregate row).
+    text_base = [r for r in rows if r["plan"] == "baseline" and r["source"] in ("text", "table")
+                 and r["operator"] != "sqltostream"]
     expected = lambda r: f(r["rows"]) + (f(r["right_rows"]) if r["operator"] in BINARY else 0)
     check("ERROR", "baseline sink did not see every input row", text_base,
           lambda r: abs(f(r["out_rows"]) - expected(r)) > 0)
@@ -67,15 +71,32 @@ def check_file(path):
             check("WARN", "cluster: not every executor ran a task (few input partitions; real Wayang behaviour)",
                   [r for r in clus if r["plan"] == "operator"],
                   lambda r: f(r.get("executors_used")) < f(r.get("executors")))
-    if "jit_compile_exec_ms" in rows[0]:
-        jr = [r for r in rows if r.get("jit_compile_exec_ms") not in ("", None) and f(r["wall_exec_ns"]) >= 20e6]
-        check("WARN", "JIT still compiling during the measured part (> 10% of wall_exec_ns, runs >= 20 ms)", jr,
-              lambda r: f(r["jit_compile_exec_ms"]) * 1e6 > 0.1 * f(r["wall_exec_ns"]))
+    elif postgres:
+        check("ERROR", "operator not on one thread (same_thread = 0)", rows, lambda r: r.get("same_thread") == "0")
+        check("ERROR", "no traced database connection in the run (db_connections = 0)", rows,
+              lambda r: not f(r.get("db_connections")) > 0)
+        to_java = [r for r in rows if f(r["out_rows"]) > 0 and not (r["operator"] == "tablesink" and r["plan"] == "operator")]
+        check("ERROR", "rows reached Java but no bytes were counted on the socket (network_bytes_in = 0)", to_java,
+              lambda r: not f(r.get("network_bytes_in")) > 0)
+        check("ERROR", "statement time > exec time", rows,
+              lambda r: f(r["wall_query_ns"]) + f(r["wall_connect_ns"]) > f(r["wall_exec_ns"]) * 1.01 + 1e6)
+        local = [r for r in rows if r.get("db_local") == "1"]
+        check("ERROR", "database on this machine but its CPU was not measured (db_cpu_ns empty)", local,
+              lambda r: r.get("db_cpu_ns", "") == "")
+        if not local:
+            results.append(("WARN", "database CPU not measured (database not on this machine, or not Linux)", len(rows), len(rows)))
+        check("WARN", "EXPLAIN of the plan failed (db_explain_exec_ms empty)", rows, lambda r: r.get("db_explain_exec_ms", "") == "")
+        check("WARN", "operator plan whose Wayang estimate is Wayang's generic fallback (join, globalreduce, tablesink)",
+              [r for r in rows if r["plan"] == "operator"], lambda r: r.get("wayang_est_fallback", "") != "")
     else:
         check("ERROR", "operator not on one thread (same_thread = 0)", rows, lambda r: r.get("same_thread") == "0")
         check("ERROR", "thread CPU > wall time (one thread)", rows,
               lambda r: f(r["thread_cpu_exec_ns"]) > f(r["wall_exec_ns"]) * 1.02 + 2e6)
         check("WARN", "held memory not measured (mem_held_bytes empty)", rows, lambda r: r.get("mem_held_bytes", "") == "")
+    if "jit_compile_exec_ms" in rows[0]:
+        jr = [r for r in rows if r.get("jit_compile_exec_ms") not in ("", None) and f(r["wall_exec_ns"]) >= 20e6]
+        check("WARN", "JIT still compiling during the measured part (> 10% of wall_exec_ns, runs >= 20 ms)", jr,
+              lambda r: f(r["jit_compile_exec_ms"]) * 1e6 > 0.1 * f(r["wall_exec_ns"]))
     if "os_sys_steal_ns" in rows[0]:
         share = lambda r: f(r["os_sys_steal_ns"]) / (f(r["wall_total_ns"]) * f(r["os_sys_cpus_after"]) or float("nan"))
         check("WARN", "VM steal time > 2% of the machine's CPU (pair dropped by analyze.py)", rows,
@@ -87,7 +108,7 @@ def check_file(path):
         results.append(("WARN", "no energy counter on this machine (RAPL not readable)", len(rows), len(rows)))
 
     # Noise: spread of the main CPU metric between the pairs of one config (operator - baseline).
-    cpu_col = "task_cpu_ns" if spark else "thread_cpu_exec_ns"
+    cpu_col = "task_cpu_ns" if spark else "wall_exec_ns" if postgres else "thread_cpu_exec_ns"
     by = defaultdict(lambda: defaultdict(dict))
     for r in rows:
         by[r["config_id"]][(r["run_id"], r["pair"])][r["plan"]] = f(r[cpu_col])

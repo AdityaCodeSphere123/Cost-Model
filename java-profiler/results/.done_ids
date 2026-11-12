@@ -1,0 +1,8 @@
+heap4g-G1-cpuall|sort|text|r100000|rr0|k1000|s-|w8
+heap4g-G1-cpuall|sort|text|r1000000|rr0|k1000|s-|w8
+heap4g-G1-cpuall|join|text|r100000|rr100000|k100000|s-|w8
+heap4g-G1-cpuall|join|text|r100000|rr100000|k10000|s-|w8
+heap4g-G1-cpuall|join|text|r1000000|rr1000000|k1000000|s-|w8
+heap4g-G1-cpuall|join|text|r1000000|rr1000000|k100000|s-|w8
+heap1g-Serial-cpu2|sort|text|r100000|rr0|k1000|s-|w8
+heap1g-Serial-cpu2|join|text|r100000|rr100000|k100000|s-|w8

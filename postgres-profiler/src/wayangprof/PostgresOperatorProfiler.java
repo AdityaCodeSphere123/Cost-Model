@@ -118,9 +118,10 @@ import java.util.stream.Collectors;
  *       Postgres and Java.</li>
  *   <li>The "exec" window starts when Wayang opens the first connection for executing the plan (after its
  *       optimizer, whose {@code SELECT count(*)} cardinality query is recorded separately).</li>
- *   <li>Database CPU (Linux, database on this machine): the CPU of each server process is read from
- *       /proc just before its connection closes; the postmaster's "children CPU" counter adds the parallel query
- *       workers, which are separate processes.</li>
+ *   <li>Database CPU (database on this machine, run by the same OS user): the CPU of each server process is read
+ *       just before its connection closes, in ns (Linux /proc/PID/schedstat, macOS the pidrusage helper); the
+ *       postmaster's "children CPU" counter adds the parallel query workers, which are separate processes (macOS: ns,
+ *       Linux: 10 ms ticks, the only resolution the kernel keeps for ended children).</li>
  *   <li>One extra, untimed EXPLAIN (ANALYZE, BUFFERS) of each plan's SQL: server execution and planning time,
  *       buffer hits and reads, temp (spill) blocks, parallel workers, JIT time and the plan shape.</li>
  * </ul>
@@ -398,6 +399,46 @@ public final class PostgresOperatorProfiler {
         final Map<String, Long> gauges = new TreeMap<>();   // levels: store value after, and the change
     }
 
+    /**
+     * OS counters over one measured window. The window can have several pieces (one per job, e.g. the union
+     * baseline runs two jobs): counter changes are summed, gauges are taken at the start of the first piece and
+     * the end of the last one.
+     */
+    static final class OsWindow {
+        final Map<String, Long> counters = new TreeMap<>();
+        Map<String, Long> gaugesBefore, gaugesAfter;
+        int pieces;
+
+        void add(OsSnap from, OsSnap to) {
+            if (from == null || to == null) return;
+            to.counters.forEach((k, v) -> {
+                Long before = from.counters.get(k);
+                Long d = before == null ? null : v - before;
+                if (d != null && d < 0 && k.equals("energy_pkg_nj") && OsProbe.raplRangeNj > 0) d += OsProbe.raplRangeNj;
+                if (this.pieces == 0) this.counters.put(k, d);
+                else {
+                    Long acc = this.counters.get(k);
+                    this.counters.put(k, acc == null || d == null ? null : acc + d);
+                }
+            });
+            if (this.gaugesBefore == null) this.gaugesBefore = from.gauges;
+            this.gaugesAfter = to.gauges;
+            this.pieces++;
+        }
+
+        /** Writes os_window, os_<counter> and os_<gauge>_after / _delta. */
+        void putInto(Map<String, Object> m, String window) {
+            m.put("os_window", window);
+            this.counters.forEach((k, v) -> m.put("os_" + k, v));
+            if (this.gaugesAfter == null) return;
+            this.gaugesAfter.forEach((k, v) -> {
+                Long before = this.gaugesBefore.get(k);
+                m.put("os_" + k + "_after", v);
+                m.put("os_" + k + "_delta", before == null ? null : v - before);
+            });
+        }
+    }
+
     static final class OsProbe {
         final String helper; // path to pidrusage (macOS), or null
         final long pid = ProcessHandle.current().pid();
@@ -407,31 +448,80 @@ public final class PostgresOperatorProfiler {
         /** RAPL's counter wraps around at this value; a negative difference is corrected by adding it. */
         static volatile long raplRangeNj;
         final boolean linux = Files.isReadable(Paths.get(PROC_ROOT, "self", "stat"));
+        /**
+         * The helper kept running in --serve mode: a reading is a pipe round trip (~20 us) instead of a new process
+         * (several ms), so the counters can be read right where the measured work starts and ends. Null: start one
+         * helper per reading (older helper without --serve).
+         */
+        private Process server;
+        private BufferedWriter toServer;
+        private BufferedReader fromServer;
 
         OsProbe(String helper) {
             this.helper = (helper != null && new File(helper).canExecute()) ? helper : null;
+            if (this.helper != null) this.startServer();
+        }
+
+        private void startServer() {
+            try {
+                Process p = new ProcessBuilder(this.helper, "--serve").redirectError(ProcessBuilder.Redirect.DISCARD).start();
+                this.toServer = new BufferedWriter(new java.io.OutputStreamWriter(p.getOutputStream(), StandardCharsets.US_ASCII));
+                this.fromServer = new BufferedReader(new InputStreamReader(p.getInputStream(), StandardCharsets.US_ASCII));
+                this.server = p;
+                String first = this.ask(this.pid);
+                if (first == null || !first.contains("c:user_ns=")) throw new IOException("no answer");
+            } catch (IOException e) {
+                System.err.println("[wayangprof] pidrusage --serve not available (rebuild native/pidrusage); starting it per reading");
+                if (this.server != null) this.server.destroy();
+                this.server = null;
+            }
         }
 
         String kind() {
             return this.helper != null ? "macos-proc_pid_rusage" : this.linux ? "linux-procfs" : "none";
         }
 
+        /** One reading of this JVM's own counters. */
         OsSnap snapshot() {
             OsSnap s = new OsSnap();
-            if (this.helper != null) this.readMac(s);
+            if (this.helper != null) this.readMac(this.pid, s);
             else if (this.linux) this.readLinux(s);
             return s;
         }
 
-        private void readMac(OsSnap s) {
+        /** One reading of another process of the same user (macOS helper only), or null. */
+        OsSnap snapshotOf(long otherPid) {
+            if (this.helper == null || otherPid <= 0) return null;
+            OsSnap s = new OsSnap();
+            return this.readMac(otherPid, s) ? s : null;
+        }
+
+        private synchronized String ask(long p) throws IOException {
+            this.toServer.write(Long.toString(p));
+            this.toServer.newLine();
+            this.toServer.flush();
+            return this.fromServer.readLine();
+        }
+
+        private boolean readMac(long p, OsSnap s) {
             try {
-                Process p = new ProcessBuilder(this.helper, Long.toString(this.pid)).redirectErrorStream(true).start();
-                String line;
-                try (BufferedReader r = new BufferedReader(new InputStreamReader(p.getInputStream()))) {
-                    line = r.readLine();
+                String line = null;
+                if (this.server != null) {
+                    try {
+                        line = this.ask(p);
+                    } catch (IOException e) {
+                        System.err.println("[wayangprof] pidrusage --serve stopped (" + e + "); starting it per reading");
+                        this.server = null;
+                    }
                 }
-                p.waitFor();
-                if (line == null) return;
+                if (this.server == null) {
+                    Process proc = new ProcessBuilder(this.helper, Long.toString(p)).redirectErrorStream(true).start();
+                    try (BufferedReader r = new BufferedReader(new InputStreamReader(proc.getInputStream()))) {
+                        line = r.readLine();
+                    }
+                    proc.waitFor();
+                }
+                if (line == null || line.startsWith("error")) return false;
                 for (String item : line.trim().split(" ")) {
                     int colon = item.indexOf(':'), eq = item.indexOf('=');
                     if (colon != 1 || eq < 0) continue;
@@ -439,8 +529,10 @@ public final class PostgresOperatorProfiler {
                     long v = Long.parseLong(item.substring(eq + 1));
                     (item.charAt(0) == 'g' ? s.gauges : s.counters).put(name, v);
                 }
+                return true;
             } catch (Exception e) {
                 System.err.println("pidrusage failed: " + e);
+                return false;
             }
         }
 
@@ -542,6 +634,7 @@ public final class PostgresOperatorProfiler {
         long connectStartNs, connectEndNs;
         // JVM state when the connection was requested: the exec window of a job starts at its first connection.
         long threadId, threadCpuNs, threadAllocBytes, processCpuNs, jitMs, gcMs;
+        OsSnap osAtConnect;             // this JVM's OS counters at that moment (start of the exec window's OS part)
         int backendPid = -1;
         final AtomicLong bytesIn = new AtomicLong(), bytesOut = new AtomicLong();
         final List<Stmt> stmts = Collections.synchronizedList(new ArrayList<>());
@@ -591,6 +684,7 @@ public final class PostgresOperatorProfiler {
         public Connection connect(String url, Properties info) throws SQLException {
             if (!this.acceptsURL(url)) return null;
             Conn c = new Conn();
+            if (OS != null) c.osAtConnect = OS.snapshot(); // first, so the reading is not inside the timed window
             c.threadId = Thread.currentThread().getId();
             c.connectStartNs = System.nanoTime();
             c.threadCpuNs = TMX.getCurrentThreadCpuTime();
@@ -832,6 +926,11 @@ public final class PostgresOperatorProfiler {
                 if (Files.isReadable(cmd) && new String(Files.readAllBytes(cmd), StandardCharsets.UTF_8).startsWith("postgres")) {
                     String[] f = statFields(this.ctlPid);
                     if (f != null) this.postmasterPid = Integer.parseInt(f[1]);
+                } else if (OS != null && OS.snapshotOf(this.ctlPid) != null) {
+                    // macOS: the server runs as this user, so the pidrusage helper can read its processes.
+                    ProcessHandle backend = ProcessHandle.of(this.ctlPid).orElse(null);
+                    ProcessHandle pm = backend == null ? null : backend.parent().orElse(null);
+                    if (pm != null && OS.snapshotOf(pm.pid()) != null) this.postmasterPid = (int) pm.pid();
                 }
             } catch (Exception e) {
                 this.postmasterPid = -1;
@@ -852,12 +951,28 @@ public final class PostgresOperatorProfiler {
             }
         }
 
-        /** {cpu ns, disk read bytes, disk write bytes} of a server process, or null (not Linux / not local). io = -1 if unreadable. */
+        /**
+         * {cpu ns, disk read bytes, disk write bytes} of a server process, or null (not local). io = -1 if unreadable.
+         * CPU in ns: Linux /proc/PID/schedstat (a server process has one thread; /proc/PID/stat would only give 10 ms
+         * ticks, too coarse for short queries), macOS the pidrusage helper.
+         */
         static long[] procCpuAndIo(int pid) {
             if (pid <= 0 || !LOCAL_DB) return null;
+            if (OS != null && OS.helper != null) {
+                OsSnap s = OS.snapshotOf(pid);
+                if (s == null) return null;
+                return new long[]{s.counters.getOrDefault("user_ns", 0L) + s.counters.getOrDefault("system_ns", 0L),
+                        s.counters.getOrDefault("disk_read_bytes", -1L), s.counters.getOrDefault("disk_write_bytes", -1L)};
+            }
             String[] f = statFields(pid);
             if (f == null) return null;
             long[] r = {(Long.parseLong(f[11]) + Long.parseLong(f[12])) * 10_000_000L, -1, -1};
+            try {
+                String sched = new String(Files.readAllBytes(Paths.get(PROC, Integer.toString(pid), "schedstat")), StandardCharsets.UTF_8);
+                r[0] = Long.parseLong(sched.trim().split("\\s+")[0]); // ns on the CPU
+            } catch (Exception e) {
+                // no schedstat (kernel without CONFIG_SCHED_INFO): keep the 10 ms ticks
+            }
             try {
                 for (String l : Files.readAllLines(Paths.get(PROC, Integer.toString(pid), "io"))) {
                     if (l.startsWith("read_bytes:")) r[1] = Long.parseLong(l.substring(11).trim());
@@ -869,9 +984,16 @@ public final class PostgresOperatorProfiler {
             return r;
         }
 
-        /** CPU of all exited children of the postmaster (server processes, parallel workers), ns; -1 if not available. */
+        /**
+         * CPU of all exited children of the postmaster (server processes, parallel workers), ns; -1 if not available.
+         * macOS: ns from the helper; Linux: cutime + cstime, 10 ms ticks (the kernel keeps no finer value for them).
+         */
         long childrenCpuNs() {
             if (!this.local()) return -1;
+            if (OS != null && OS.helper != null) {
+                OsSnap s = OS.snapshotOf(this.postmasterPid);
+                return s == null ? -1 : s.counters.getOrDefault("child_user_ns", 0L) + s.counters.getOrDefault("child_system_ns", 0L);
+            }
             String[] f = statFields(this.postmasterPid);
             return f == null ? -1 : (Long.parseLong(f[13]) + Long.parseLong(f[14])) * 10_000_000L;
         }
@@ -883,7 +1005,9 @@ public final class PostgresOperatorProfiler {
             long deadline = System.currentTimeMillis() + 5000;
             while (System.currentTimeMillis() < deadline) {
                 boolean alive;
-                if (this.local()) {
+                if (this.local() && OS != null && OS.helper != null) {
+                    alive = ps.stream().anyMatch(p -> ProcessHandle.of(p).map(ProcessHandle::isAlive).orElse(false));
+                } else if (this.local()) {
                     alive = ps.stream().anyMatch(p -> Files.exists(Paths.get(PROC, Integer.toString(p))));
                 } else {
                     try (PreparedStatement st = this.ctl.prepareStatement("SELECT count(*) FROM pg_stat_activity WHERE pid = ANY(?)")) {
@@ -1043,8 +1167,10 @@ public final class PostgresOperatorProfiler {
         }
     }
 
-    /** Set once in main: the database runs on this machine and its processes can be read in /proc. */
+    /** Set once in main: the database runs on this machine and its processes can be read (/proc or the macOS helper). */
     static volatile boolean LOCAL_DB;
+    /** This JVM's OS probe (null if none); also reads the server processes on macOS. */
+    static volatile OsProbe OS;
 
     // ------------------------------------------------------------------------------------------
     // Config
@@ -1453,6 +1579,7 @@ public final class PostgresOperatorProfiler {
         int nJobs = plans.size();
         long[] jStart = new long[nJobs], jEnd = new long[nJobs], jCpu = new long[nJobs], jAlloc = new long[nJobs],
                 jPcpu = new long[nJobs], jJit = new long[nJobs], jGc = new long[nJobs];
+        OsSnap[] jOs = new OsSnap[nJobs];
         for (int j = 0; j < nJobs; j++) {
             jStart[j] = System.nanoTime();
             ctx.execute(c.op + (baseline ? "-baseline" : ""), plans.get(j));
@@ -1462,6 +1589,7 @@ public final class PostgresOperatorProfiler {
             jPcpu[j] = OSMX.getProcessCpuTime();
             jJit[j] = jitTotalMs();
             jGc[j] = gcTotalMs();
+            jOs[j] = OS == null ? null : os.snapshot(); // after the clocks above
         }
 
         long t1 = System.nanoTime();
@@ -1469,16 +1597,17 @@ public final class PostgresOperatorProfiler {
         long alloc1 = TMX.getThreadAllocatedBytes(me);
         long pcpu1 = OSMX.getProcessCpuTime();
         long talloc1 = TMX.getTotalThreadAllocatedBytes();
+        OsSnap os1 = os.snapshot(); // right at the end, before the pause below
         Map<String, Long> peaks = poolPeaks();
         sleep(50); // let late GC notifications arrive
         LiveHeap.measuring = false;
-        OsSnap os1 = os.snapshot();
         Map<String, Long> jvm1 = jvmCounters();
         List<Conn> conns = finishRun(db);
         long children1 = db.childrenCpuNs();
 
         // Exec window of each job: from the first connection Wayang opened to execute it (not its optimizer's) to the end.
         boolean tapped = true, sameThread = true;
+        OsWindow osExec = new OsWindow();
         long wallExec = 0, cpuExec = 0, allocExec = 0, pcpuExec = 0, jitExec = 0, gcExec = 0;
         long connectNs = 0, queryNs = 0, bytesIn = 0, bytesOut = 0, optQueryNs = 0;
         long backendCpu = 0, allBackendCpu = 0, optCpu = 0, readBytes = 0, writeBytes = 0;
@@ -1496,6 +1625,7 @@ public final class PostgresOperatorProfiler {
                 continue;
             }
             if (first.threadId != me) sameThread = false;
+            osExec.add(first.osAtConnect, jOs[j]);
             wallExec += jEnd[j] - first.connectStartNs;
             cpuExec += jCpu[j] - first.threadCpuNs;
             allocExec += jAlloc[j] - first.threadAllocBytes;
@@ -1576,18 +1706,15 @@ public final class PostgresOperatorProfiler {
         m.put("optimizer_db_cpu_ns", cpuKnown ? optCpu : null);
         // JVM counters
         jvm1.forEach((k, v) -> m.put(k, v - jvm0.getOrDefault(k, 0L)));
-        // OS counters of the JVM process (whole run)
-        os1.counters.forEach((k, v) -> {
-            Long before = os0.counters.get(k);
-            Long d = before == null ? null : v - before;
-            if (d != null && d < 0 && k.equals("energy_pkg_nj") && OsProbe.raplRangeNj > 0) d += OsProbe.raplRangeNj;
-            m.put("os_" + k, d);
-        });
-        os1.gauges.forEach((k, v) -> {
-            Long before = os0.gauges.get(k);
-            m.put("os_" + k + "_after", v);
-            m.put("os_" + k + "_delta", before == null ? null : v - before);
-        });
+        // OS counters of the JVM process over the exec window (first execution connection to job end, like
+        // wall_exec_ns), so they leave out Wayang's optimizer; window "run" (whole execute() calls) otherwise.
+        if (tapped && osExec.pieces == nJobs) {
+            osExec.putInto(m, "exec");
+        } else {
+            OsWindow run = new OsWindow();
+            run.add(os0, os1);
+            run.putInto(m, "run");
+        }
         return m;
     }
 
@@ -1604,6 +1731,7 @@ public final class PostgresOperatorProfiler {
         TMX.setThreadAllocatedMemoryEnabled(true);
         LiveHeap.install();
         OsProbe os = new OsProbe(c.pidrusage);
+        OS = os.kind().equals("none") ? null : os;
 
         // Database: our own connection, the traced driver for Wayang's connections, and the input tables.
         ProfDriver.sessionOptions = c.sessionOptions();

@@ -1,8 +1,12 @@
 // Prints every per-process counter macOS keeps for one process.
 //
-// Usage: pidrusage <pid>
+// Usage: pidrusage <pid>      one reading, then exit
+//        pidrusage --serve    stays running: reads one pid per line from stdin and answers each with one
+//                             reading (a line). The profilers keep one helper running, so a reading costs a
+//                             pipe round trip (~0.1 ms) instead of starting a process (several ms); that lets
+//                             them read the counters exactly when the measured work starts and ends.
 //
-// Output: one line of "<kind>:<name>=<value>" items separated by spaces.
+// Output: one line of "<kind>:<name>=<value>" items separated by spaces ("error=<errno>" if the pid cannot be read).
 //   kind "c" = counter that only grows (the profiler stores after - before)
 //   kind "g" = gauge, a level at this moment (the profiler stores the value after the run and the change)
 // Time fields are converted to nanoseconds (on Apple Silicon the kernel reports mach ticks).
@@ -10,13 +14,16 @@
 // Sources:
 //   proc_pid_rusage(RUSAGE_INFO_V6)  -> CPU time, instructions, cycles, energy, disk I/O, memory footprint, ...
 //   proc_pidinfo(PROC_PIDTASKINFO)   -> page faults, context switches, syscalls, threads, virtual/resident size
+// Any process of the same user can be read (e.g. a PostgreSQL server started by this user).
 //
 // Build: cc -O2 -o pidrusage pidrusage.c
+#include <errno.h>
 #include <libproc.h>
 #include <mach/mach_time.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 #include <sys/proc_info.h>
 #include <sys/resource.h>
 
@@ -26,20 +33,12 @@ static void c(const char *name, uint64_t v) { printf("c:%s=%llu ", name, (unsign
 static void g(const char *name, uint64_t v) { printf("g:%s=%llu ", name, (unsigned long long)v); }
 static void ct(const char *name, uint64_t ticks) { c(name, (uint64_t)(ticks * ticks_to_ns)); }
 
-int main(int argc, char **argv) {
-    if (argc != 2) {
-        fprintf(stderr, "usage: %s <pid>\n", argv[0]);
-        return 2;
-    }
-    int pid = atoi(argv[1]);
-
-    mach_timebase_info_data_t tb;
-    mach_timebase_info(&tb);
-    ticks_to_ns = (double)tb.numer / (double)tb.denom;
-
+/** Prints one reading of pid as one line; returns 0, or 1 if the pid cannot be read. */
+static int reading(int pid) {
     struct rusage_info_v6 ri;
     if (proc_pid_rusage(pid, RUSAGE_INFO_V6, (rusage_info_t *)&ri) != 0) {
-        perror("proc_pid_rusage");
+        printf("error=%d\n", errno);
+        fflush(stdout);
         return 1;
     }
 
@@ -60,6 +59,9 @@ int main(int argc, char **argv) {
     ct("cpu_qos_legacy_ns", ri.ri_cpu_time_qos_legacy);
     ct("cpu_qos_user_initiated_ns", ri.ri_cpu_time_qos_user_initiated);
     ct("cpu_qos_user_interactive_ns", ri.ri_cpu_time_qos_user_interactive);
+    // CPU of child processes that have ended and been reaped (e.g. PostgreSQL's parallel workers, read on the postmaster)
+    ct("child_user_ns", ri.ri_child_user_time);
+    ct("child_system_ns", ri.ri_child_system_time);
 
     // Hardware counters and energy
     c("instructions", ri.ri_instructions);
@@ -105,5 +107,31 @@ int main(int argc, char **argv) {
         g("threads_running", (uint32_t)ti.pti_numrunning);
     }
     printf("\n");
+    fflush(stdout);
     return 0;
+}
+
+int main(int argc, char **argv) {
+    if (argc != 2) {
+        fprintf(stderr, "usage: %s <pid> | --serve\n", argv[0]);
+        return 2;
+    }
+    mach_timebase_info_data_t tb;
+    mach_timebase_info(&tb);
+    ticks_to_ns = (double)tb.numer / (double)tb.denom;
+
+    if (strcmp(argv[1], "--serve") == 0) {
+        char line[64];
+        while (fgets(line, sizeof(line), stdin) != NULL) {
+            int pid = atoi(line);
+            if (pid <= 0) {
+                printf("error=%d\n", EINVAL);
+                fflush(stdout);
+                continue;
+            }
+            reading(pid);
+        }
+        return 0;
+    }
+    return reading(atoi(argv[1]));
 }

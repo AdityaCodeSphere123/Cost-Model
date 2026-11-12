@@ -273,18 +273,26 @@ public final class SparkOperatorProfiler {
         // Sums over the jobs of one measured run (the union baseline runs two jobs).
         static long sumWall, sumCpu, sumAlloc, sumJit, sumGc;
         static boolean allFired;
+        /** OS counters over the same window (first record to job end), summed over the jobs; null = no OS probe. */
+        static OsProbe os;
+        static volatile OsSnap osAtFire;
+        static OsWindow osExec;
 
         static void resetRun() {
             sumWall = sumCpu = sumAlloc = sumJit = sumGc = 0;
             allFired = true;
+            osExec = new OsWindow();
         }
 
         static void reset() {
             fired.set(false);
+            osAtFire = null;
         }
 
         static void fire() {
             if (!fired.compareAndSet(false, true)) return;
+            // OS counters first (~20 us with the helper in --serve mode), so the reading is not inside the timed window.
+            if (os != null) osAtFire = os.snapshot();
             wallNs = System.nanoTime();
             processCpuNs = OSMX.getProcessCpuTime();
             totalAllocBytes = TMX.getTotalThreadAllocatedBytes();
@@ -303,6 +311,7 @@ public final class SparkOperatorProfiler {
             sumAlloc += TMX.getTotalThreadAllocatedBytes() - totalAllocBytes;
             sumJit += jitTotalMs() - jitMs;
             sumGc += gcTotalMs() - gcMs;
+            if (os != null && osAtFire != null) osExec.add(osAtFire, os.snapshot()); // after the clocks above
         }
     }
 
@@ -575,9 +584,29 @@ public final class SparkOperatorProfiler {
             return new CountingSink<>(this.getType());
         }
 
+        /**
+         * Wayang's estimate must describe what this sink really runs: rdd.count() on the executors, only the count
+         * goes to the driver. That is exactly SparkCountOperator, so its estimate is used. (localcallbacksink
+         * would model collecting every row to the driver: 4000 cycles and 4.5 network bytes per row that are
+         * never spent, which made Wayang's operator - baseline estimate negative for operators that drop rows.)
+         */
         @Override
         public String getLoadProfileEstimatorConfigurationKey() {
-            return "wayang.spark.localcallbacksink.load";
+            return LOAD_KEY;
+        }
+
+        static final String LOAD_KEY = "wayang.spark.countingsink.load";
+
+        /**
+         * Registers the sink's estimate: Wayang's own wayang.spark.count.load (same formula, same numbers), declared
+         * with 0 outputs because Wayang checks that an estimate has as many outputs as its operator. Call after the
+         * Spark plugin was added (it loads the defaults into the configuration).
+         */
+        static void registerEstimate(Configuration conf) {
+            String count = conf.getStringProperty("wayang.spark.count.load");
+            String sink = count.replaceFirst("\"out\"\\s*:\\s*1", "\"out\":0");
+            if (sink.equals(count)) throw new IllegalStateException("unexpected wayang.spark.count.load: " + count);
+            conf.setProperty(LOAD_KEY, sink);
         }
 
         @Override
@@ -606,6 +635,46 @@ public final class SparkOperatorProfiler {
         final Map<String, Long> gauges = new TreeMap<>();   // levels: store value after, and the change
     }
 
+    /**
+     * OS counters over one measured window. The window can have several pieces (one per job, e.g. the union
+     * baseline runs two jobs): counter changes are summed, gauges are taken at the start of the first piece and
+     * the end of the last one.
+     */
+    static final class OsWindow {
+        final Map<String, Long> counters = new TreeMap<>();
+        Map<String, Long> gaugesBefore, gaugesAfter;
+        int pieces;
+
+        void add(OsSnap from, OsSnap to) {
+            if (from == null || to == null) return;
+            to.counters.forEach((k, v) -> {
+                Long before = from.counters.get(k);
+                Long d = before == null ? null : v - before;
+                if (d != null && d < 0 && k.equals("energy_pkg_nj") && OsProbe.raplRangeNj > 0) d += OsProbe.raplRangeNj;
+                if (this.pieces == 0) this.counters.put(k, d);
+                else {
+                    Long acc = this.counters.get(k);
+                    this.counters.put(k, acc == null || d == null ? null : acc + d);
+                }
+            });
+            if (this.gaugesBefore == null) this.gaugesBefore = from.gauges;
+            this.gaugesAfter = to.gauges;
+            this.pieces++;
+        }
+
+        /** Writes os_window, os_<counter> and os_<gauge>_after / _delta. */
+        void putInto(Map<String, Object> m, String window) {
+            m.put("os_window", window);
+            this.counters.forEach((k, v) -> m.put("os_" + k, v));
+            if (this.gaugesAfter == null) return;
+            this.gaugesAfter.forEach((k, v) -> {
+                Long before = this.gaugesBefore.get(k);
+                m.put("os_" + k + "_after", v);
+                m.put("os_" + k + "_delta", before == null ? null : v - before);
+            });
+        }
+    }
+
     static final class OsProbe {
         final String helper; // path to pidrusage (macOS), or null
         final long pid = ProcessHandle.current().pid();
@@ -615,31 +684,80 @@ public final class SparkOperatorProfiler {
         /** RAPL's counter wraps around at this value; a negative difference is corrected by adding it. */
         static volatile long raplRangeNj;
         final boolean linux = Files.isReadable(Paths.get(PROC_ROOT, "self", "stat"));
+        /**
+         * The helper kept running in --serve mode: a reading is a pipe round trip (~20 us) instead of a new process
+         * (several ms), so the counters can be read right where the measured work starts and ends. Null: start one
+         * helper per reading (older helper without --serve).
+         */
+        private Process server;
+        private BufferedWriter toServer;
+        private BufferedReader fromServer;
 
         OsProbe(String helper) {
             this.helper = (helper != null && new File(helper).canExecute()) ? helper : null;
+            if (this.helper != null) this.startServer();
+        }
+
+        private void startServer() {
+            try {
+                Process p = new ProcessBuilder(this.helper, "--serve").redirectError(ProcessBuilder.Redirect.DISCARD).start();
+                this.toServer = new BufferedWriter(new java.io.OutputStreamWriter(p.getOutputStream(), StandardCharsets.US_ASCII));
+                this.fromServer = new BufferedReader(new InputStreamReader(p.getInputStream(), StandardCharsets.US_ASCII));
+                this.server = p;
+                String first = this.ask(this.pid);
+                if (first == null || !first.contains("c:user_ns=")) throw new IOException("no answer");
+            } catch (IOException e) {
+                System.err.println("[wayangprof] pidrusage --serve not available (rebuild native/pidrusage); starting it per reading");
+                if (this.server != null) this.server.destroy();
+                this.server = null;
+            }
         }
 
         String kind() {
             return this.helper != null ? "macos-proc_pid_rusage" : this.linux ? "linux-procfs" : "none";
         }
 
+        /** One reading of this JVM's own counters. */
         OsSnap snapshot() {
             OsSnap s = new OsSnap();
-            if (this.helper != null) this.readMac(s);
+            if (this.helper != null) this.readMac(this.pid, s);
             else if (this.linux) this.readLinux(s);
             return s;
         }
 
-        private void readMac(OsSnap s) {
+        /** One reading of another process of the same user (macOS helper only), or null. */
+        OsSnap snapshotOf(long otherPid) {
+            if (this.helper == null || otherPid <= 0) return null;
+            OsSnap s = new OsSnap();
+            return this.readMac(otherPid, s) ? s : null;
+        }
+
+        private synchronized String ask(long p) throws IOException {
+            this.toServer.write(Long.toString(p));
+            this.toServer.newLine();
+            this.toServer.flush();
+            return this.fromServer.readLine();
+        }
+
+        private boolean readMac(long p, OsSnap s) {
             try {
-                Process p = new ProcessBuilder(this.helper, Long.toString(this.pid)).redirectErrorStream(true).start();
-                String line;
-                try (BufferedReader r = new BufferedReader(new InputStreamReader(p.getInputStream()))) {
-                    line = r.readLine();
+                String line = null;
+                if (this.server != null) {
+                    try {
+                        line = this.ask(p);
+                    } catch (IOException e) {
+                        System.err.println("[wayangprof] pidrusage --serve stopped (" + e + "); starting it per reading");
+                        this.server = null;
+                    }
                 }
-                p.waitFor();
-                if (line == null) return;
+                if (this.server == null) {
+                    Process proc = new ProcessBuilder(this.helper, Long.toString(p)).redirectErrorStream(true).start();
+                    try (BufferedReader r = new BufferedReader(new InputStreamReader(proc.getInputStream()))) {
+                        line = r.readLine();
+                    }
+                    proc.waitFor();
+                }
+                if (line == null || line.startsWith("error")) return false;
                 for (String item : line.trim().split(" ")) {
                     int colon = item.indexOf(':'), eq = item.indexOf('=');
                     if (colon != 1 || eq < 0) continue;
@@ -647,8 +765,10 @@ public final class SparkOperatorProfiler {
                     long v = Long.parseLong(item.substring(eq + 1));
                     (item.charAt(0) == 'g' ? s.gauges : s.counters).put(name, v);
                 }
+                return true;
             } catch (Exception e) {
                 System.err.println("pidrusage failed: " + e);
+                return false;
             }
         }
 
@@ -1258,13 +1378,13 @@ public final class SparkOperatorProfiler {
         long cpu1 = TMX.getCurrentThreadCpuTime();
         long pcpu1 = OSMX.getProcessCpuTime();
         long talloc1 = TMX.getTotalThreadAllocatedBytes();
+        OsSnap os1 = os.snapshot(); // right at the end, before draining Spark's events and the pause below
         Map<String, Long> peaks = poolPeaks();
         long execCpu1 = Executors.cpuNs();
         boolean drained = SparkStats.drain(jsc);
         Map<String, Long> spark = stats.snapshot();
         sleep(50); // let late GC notifications arrive
         LiveHeap.measuring = false;
-        OsSnap os1 = os.snapshot();
         Map<String, Long> jvm1 = jvmCounters();
 
         // Wall time from the first task launch of each job to the job's end (ms resolution at the start).
@@ -1311,18 +1431,16 @@ public final class SparkOperatorProfiler {
         m.putAll(spark);
         // JVM counters
         jvm1.forEach((k, v) -> m.put(k, v - jvm0.getOrDefault(k, 0L)));
-        // OS counters
-        os1.counters.forEach((k, v) -> {
-            Long before = os0.counters.get(k);
-            Long d = before == null ? null : v - before;
-            if (d != null && d < 0 && k.equals("energy_pkg_nj") && OsProbe.raplRangeNj > 0) d += OsProbe.raplRangeNj;
-            m.put("os_" + k, d);
-        });
-        os1.gauges.forEach((k, v) -> {
-            Long before = os0.gauges.get(k);
-            m.put("os_" + k + "_after", v);
-            m.put("os_" + k + "_delta", before == null ? null : v - before);
-        });
+        // OS counters of this JVM over the exec window (first record to job end, like wall_exec_ns and
+        // process_cpu_exec_ns), so they leave out Wayang's optimizer and the JIT/GC work after the run. Window "run"
+        // (whole execute() calls) when the tap does not fire in this JVM (cluster mode: the records are read in the executors).
+        if (tapped && Tap.osExec.pieces == plans.size()) {
+            Tap.osExec.putInto(m, "exec");
+        } else {
+            OsWindow run = new OsWindow();
+            run.add(os0, os1);
+            run.putInto(m, "run");
+        }
         // Network: shuffle bytes fetched from another executor. 0 in local mode (one block manager). In cluster
         // mode spark.shuffle.readHostLocalDisk is off, so blocks of other executors on the same machine are
         // fetched over TCP and counted here (with it on, Spark reads them from disk and counts them as local).
@@ -1519,6 +1637,7 @@ public final class SparkOperatorProfiler {
         TMX.setThreadAllocatedMemoryEnabled(true);
         LiveHeap.install();
         OsProbe os = new OsProbe(c.pidrusage);
+        Tap.os = os.kind().equals("none") ? null : os;
 
         // Inputs: the same files as the Java profiler. The right input uses another seed.
         DataGen gen = new DataGen();
@@ -1564,6 +1683,7 @@ public final class SparkOperatorProfiler {
             setDefault("spark.executor.extraJavaOptions", "-XX:ActiveProcessorCount=" + c.executorCores);
         }
         WayangContext ctx = new WayangContext(conf).withPlugin(Spark.basicPlugin());
+        CountingSink.registerEstimate(conf);
         Files.createDirectories(c.tmpDir);
         Path sinkDir = c.tmpDir.resolve("wayangprof-sink-" + ProcessHandle.current().pid());
 

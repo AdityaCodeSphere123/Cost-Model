@@ -148,9 +148,18 @@ public final class JobBench {
             return new CountingSink<>(this.getType());
         }
 
+        /** rdd.count(), exactly what SparkCountOperator runs, so Wayang's count estimate (see SparkOperatorProfiler). */
         @Override
         public String getLoadProfileEstimatorConfigurationKey() {
-            return "wayang.spark.localcallbacksink.load";
+            return "wayang.spark.countingsink.load";
+        }
+
+        /** wayang.spark.count.load declared with 0 outputs (Wayang checks the output count). After adding the Spark plugin. */
+        static void registerEstimate(Configuration conf) {
+            String count = conf.getStringProperty("wayang.spark.count.load");
+            String sink = count.replaceFirst("\"out\"\\s*:\\s*1", "\"out\":0");
+            if (sink.equals(count)) throw new IllegalStateException("unexpected wayang.spark.count.load: " + count);
+            conf.setProperty("wayang.spark.countingsink.load", sink);
         }
 
         @Override
@@ -520,6 +529,7 @@ public final class JobBench {
         conf.setProperty("wayang.spark.cores-per-machine", Integer.toString(cores));
         if (System.getProperty("spark.ui.enabled") == null) System.setProperty("spark.ui.enabled", "false");
         WayangContext ctx = new WayangContext(conf).withPlugin(Java.basicPlugin()).withPlugin(Spark.basicPlugin());
+        CountingSink.registerEstimate(conf);
 
         // Keep one SparkContext for all jobs, as the Spark profiler does.
         Job pin = ctx.createJob("pin", build(jobs.get(0), Placement.spark, dir));

@@ -1,0 +1,71 @@
+==== Thu Nov 12 17:18:34 IST 2026  profile=default  configs=24
+host=Aditya-MacBook-Pro  os=Darwin 27.2.0  cpu=Apple M4 Pro
+openjdk version "17.0.20" 2026-07-21
+OpenJDK Runtime Environment Homebrew (build 17.0.20+0)
+OpenJDK 64-Bit Server VM Homebrew (build 17.0.20+0, mixed mode, sharing)
+SLF4J: Class path contains multiple SLF4J providers.
+SLF4J: Found provider [org.apache.logging.slf4j.SLF4JServiceProvider@fd8294b]
+SLF4J: Found provider [org.slf4j.simple.SimpleServiceProvider@5974109]
+SLF4J: See https://www.slf4j.org/codes.html#multiple_bindings for an explanation.
+SLF4J: Actual provider is of type [org.apache.logging.slf4j.SLF4JServiceProvider@fd8294b]
+[wayangprof] heap4g-G1-cpuall|sort|text|r100000|rr0|k1000|s-|w8  warmup=3 reps=7  os_probe=macos-proc_pid_rusage  measured=+JavaSortOperator
+[wayangprof]   pair 0 baseline  exec=    14.9ms cpu=    18.9ms alloc=     38.7MB energy=0.041J out=100000
+[wayangprof]   pair 0 sort      exec=    36.8ms cpu=    41.4ms alloc=     40.7MB energy=0.126J out=100000
+[wayangprof]   pair 1 sort      exec=    31.0ms cpu=    34.3ms alloc=     40.7MB energy=0.162J out=100000
+[wayangprof]   pair 1 baseline  exec=    14.2ms cpu=    17.6ms alloc=     38.7MB energy=0.039J out=100000
+[wayangprof]   pair 2 baseline  exec=    10.0ms cpu=    12.7ms alloc=     38.7MB energy=0.071J out=100000
+[wayangprof]   pair 2 sort      exec=    38.6ms cpu=    43.6ms alloc=     40.7MB energy=0.113J out=100000
+[wayangprof]   pair 3 sort      exec=    37.3ms cpu=    41.6ms alloc=     40.7MB energy=0.121J out=100000
+[wayangprof]   pair 3 baseline  exec=    17.9ms cpu=    22.7ms alloc=     38.7MB energy=0.028J out=100000
+[wayangprof]   pair 4 baseline  exec=    12.6ms cpu=    15.7ms alloc=     38.7MB energy=0.063J out=100000
+[wayangprof]   pair 4 sort      exec=    39.1ms cpu=    44.5ms alloc=     40.7MB energy=0.111J out=100000
+[wayangprof]   pair 5 sort      exec=    35.4ms cpu=    39.7ms alloc=     40.7MB energy=0.118J out=100000
+[wayangprof]   pair 5 baseline  exec=    16.0ms cpu=    20.0ms alloc=     38.7MB energy=0.030J out=100000
+[wayangprof]   pair 6 baseline  exec=    13.0ms cpu=    16.3ms alloc=     38.7MB energy=0.046J out=100000
+[wayangprof]   pair 6 sort      exec=    33.6ms cpu=    37.4ms alloc=     40.7MB energy=0.194J out=100000
+SLF4J: Class path contains multiple SLF4J providers.
+SLF4J: Found provider [org.apache.logging.slf4j.SLF4JServiceProvider@fd8294b]
+SLF4J: Found provider [org.slf4j.simple.SimpleServiceProvider@5974109]
+SLF4J: See https://www.slf4j.org/codes.html#multiple_bindings for an explanation.
+SLF4J: Actual provider is of type [org.apache.logging.slf4j.SLF4JServiceProvider@fd8294b]
+[wayangprof] heap4g-G1-cpuall|sort|text|r1000000|rr0|k1000|s-|w8  warmup=3 reps=7  os_probe=macos-proc_pid_rusage  measured=+JavaSortOperator
+[wayangprof]   pair 0 baseline  exec=   119.2ms cpu=   124.8ms alloc=    379.1MB energy=0.511J out=1000000
+[wayangprof]   pair 0 sort      exec=   402.7ms cpu=   405.7ms alloc=    398.1MB energy=2.498J out=1000000
+[wayangprof]   pair 1 sort      exec=   408.6ms cpu=   409.7ms alloc=    398.1MB energy=2.627J out=1000000
+[wayangprof]   pair 1 baseline  exec=   130.1ms cpu=   134.4ms alloc=    379.1MB energy=0.439J out=1000000
+[wayangprof]   pair 2 baseline  exec=   116.5ms cpu=   120.9ms alloc=    379.1MB energy=0.511J out=1000000
+[wayangprof]   pair 2 sort      exec=   407.5ms cpu=   411.4ms alloc=    398.1MB energy=2.488J out=1000000
+[wayangprof]   pair 3 sort      exec=   406.0ms cpu=   407.1ms alloc=    398.1MB energy=2.642J out=1000000
+[wayangprof]   pair 3 baseline  exec=   106.6ms cpu=   109.7ms alloc=    379.1MB energy=0.577J out=1000000
+[wayangprof]   pair 4 baseline  exec=   107.4ms cpu=   110.2ms alloc=    379.1MB energy=0.550J out=1000000
+[wayangprof]   pair 4 sort      exec=   443.7ms cpu=   448.1ms alloc=    398.1MB energy=2.623J out=1000000
+[wayangprof]   pair 5 sort      exec=   421.4ms cpu=   419.1ms alloc=    398.1MB energy=2.659J out=1000000
+[wayangprof]   pair 5 baseline  exec=   114.2ms cpu=   117.4ms alloc=    379.1MB energy=0.554J out=1000000
+[wayangprof]   pair 6 baseline  exec=   118.5ms cpu=   123.9ms alloc=    379.1MB energy=0.495J out=1000000
+[wayangprof]   pair 6 sort      exec=   432.0ms cpu=   434.9ms alloc=    398.1MB energy=2.703J out=1000000
+SLF4J: Class path contains multiple SLF4J providers.
+SLF4J: Found provider [org.apache.logging.slf4j.SLF4JServiceProvider@1ef3efa8]
+SLF4J: Found provider [org.slf4j.simple.SimpleServiceProvider@502f1f4c]
+SLF4J: See https://www.slf4j.org/codes.html#multiple_bindings for an explanation.
+SLF4J: Actual provider is of type [org.apache.logging.slf4j.SLF4JServiceProvider@1ef3efa8]
+[wayangprof] heap4g-G1-cpuall|join|text|r100000|rr100000|k100000|s-|w8  warmup=3 reps=7  os_probe=macos-proc_pid_rusage  measured=+JavaJoinOperator -JavaUnionAllOperator
+[wayangprof]   pair 0 baseline  exec=    30.3ms cpu=    37.1ms alloc=     77.6MB energy=0.084J out=200000
+[wayangprof]   pair 0 join      exec=    45.1ms cpu=    58.1ms alloc=    112.3MB energy=0.094J out=100087
+[wayangprof]   pair 1 join      exec=    49.9ms cpu=    57.4ms alloc=    112.3MB energy=0.198J out=100087
+[wayangprof]   pair 1 baseline  exec=    29.2ms cpu=    34.6ms alloc=     77.6MB energy=0.128J out=200000
+[wayangprof]   pair 2 baseline  exec=    30.0ms cpu=    34.3ms alloc=     77.6MB energy=0.096J out=200000
+[wayangprof]   pair 2 join      exec=    45.3ms cpu=    53.7ms alloc=    112.3MB energy=0.111J out=100087
+[wayangprof]   pair 3 join      exec=    47.8ms cpu=    59.5ms alloc=    112.3MB energy=0.095J out=100087
+[wayangprof]   pair 3 baseline  exec=    34.3ms cpu=    42.3ms alloc=     77.6MB energy=0.058J out=200000
+[wayangprof]   pair 4 baseline  exec=    34.6ms cpu=    43.9ms alloc=     77.6MB energy=0.059J out=200000
+[wayangprof]   pair 4 join      exec=    45.3ms cpu=    53.0ms alloc=    112.3MB energy=0.131J out=100087
+[wayangprof]   pair 5 join      exec=    44.6ms cpu=    52.0ms alloc=    112.3MB energy=0.116J out=100087
+[wayangprof]   pair 5 baseline  exec=    29.7ms cpu=    34.6ms alloc=     77.6MB energy=0.096J out=200000
+[wayangprof]   pair 6 baseline  exec=    33.2ms cpu=    41.0ms alloc=     77.6MB energy=0.058J out=200000
+[wayangprof]   pair 6 join      exec=    47.8ms cpu=    59.7ms alloc=    112.3MB energy=0.096J out=100087
+SLF4J: Class path contains multiple SLF4J providers.
+SLF4J: Found provider [org.apache.logging.slf4j.SLF4JServiceProvider@1ef3efa8]
+SLF4J: Found provider [org.slf4j.simple.SimpleServiceProvider@502f1f4c]
+SLF4J: See https://www.slf4j.org/codes.html#multiple_bindings for an explanation.
+SLF4J: Actual provider is of type [org.apache.logging.slf4j.SLF4JServiceProvider@1ef3efa8]
+[wayangprof] heap4g-G1-cpuall|join|text|r100000|rr100000|k10000|s-|w8  warmup=3 reps=7  os_probe=macos-proc_pid_rusage  measured=+JavaJoinOperator -JavaUnionAllOperator

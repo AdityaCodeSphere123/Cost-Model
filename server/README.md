@@ -3,10 +3,91 @@
 Collects the large training dataset for the cost model on a dedicated machine: Wayang's Java platform and
 Spark single-node, alternating, with Wayang's estimate stored next to every measurement.
 
+## The big run on the server: prepare, test, collect (recommended)
+
+Three commands, in this order. Only the first needs the internet; none needs root.
+
+```bash
+# on the Mac: pack everything (code + Wayang jars of this repo + Spark jars + Java 17), copy it over
+cd Cost-Model/server && ./make-bundle.sh --jdk x64
+scp ../dist/cost-model-server.tar.gz USER@SERVER:
+
+# on the server
+tar xzf cost-model-server.tar.gz && cd cost-model-server/Cost-Model/server
+./prepare.sh        # ONLINE, ~5-20 min: whatever is missing (portable PostgreSQL, model packages), compiles
+                    #   -> ends with "prepare DONE"; from here on the internet can be off
+./test.sh           # offline, ~15 min: every part on small single-operator jobs -> must end with TEST PASSED
+tmux new -s wayang  # so the run survives closing VS Code / the laptop
+./collect.sh start --until "2026-11-15 08:00"     # Ctrl+B then D to detach; it runs until then
+```
+
+Back later: `ssh USER@SERVER`, then `tmux attach -t wayang` (live), `./collect.sh status`, or
+`tail -f ../collect/collect.log`. The dataset: `scp USER@SERVER:cost-model-server/Cost-Model/collect/export/wayang-cost-data.tar.gz .`
+(refreshed every 3 hours and at the end, so there is always a recent one).
+
+**Wayang on the server.** The bundle carries the Wayang jars of this repository (4.7 MB of Wayang code plus its
+libraries): the profilers use Wayang internals and were compiled and tested against exactly these. To use a Wayang
+already on the server instead, copy only `Cost-Model/` and set `WAYANG_HOME=<its built distribution, with jars/ and
+libs/>` (or put `Cost-Model/` next to the Wayang source: `prepare.sh` then builds it with Maven, online). `prepare.sh`
+compiles the profilers against it and stops if they do not fit.
+
+### What `collect.sh` does
+
+It splits the machine into **lanes** that run at the same time, each pinned to its own CPUs (`taskset`; both
+hyperthreads of a core go to the same lane), each with its own memory budget, data folder and ports:
+
+| Lane | What it measures | Example on 64 CPUs |
+|---|---|---|
+| `java-N` | Wayang's Java platform, 13 operators, one JVM at a time | 4 lanes x 2 CPUs |
+| `spark-N` | Spark local mode, 13 operators, local[1..4] | 3 lanes x 4 CPUs |
+| `postgres-N` | Wayang's PostgreSQL platform, 6 operators; **every lane has its own PostgreSQL server**, so the database CPU read from `/proc` belongs to that lane | 2 lanes x 6 CPUs |
+| `cluster` | Spark standalone clusters with **1, 2, 3, ..., 10 executors**, one cluster at a time; the sizes take turns every 20 configs and all sizes run the same data configs | 2 + 10 x 3 CPUs |
+
+`./collect.sh plan` prints the plan for the machine without starting. On a shared server, leave CPUs to others:
+`--cpus 0-47`; or set lanes by hand: `--plan "cluster=10x3 java=4x2 spark=3x4 postgres=2x6"`. Memory: 85% of what
+is free at the start (`--mem-gb` to change), 40% for the cluster lane, the rest by CPUs (Java lanes count double:
+their large sorts and joins need 4 GB+ heaps).
+
+Every lane works through its share of one fixed, random config list per platform (100,000 Java / Spark configs,
+40,000 PostgreSQL configs, 5,000 data configs x 10 cluster sizes): all operators in turn; input sizes 1k..3M rows in
+x1.25 steps; keys, selectivity, row width; heap / GC / cores; PostgreSQL parallel workers and indexes. The lists are
+far longer than 3 days can finish, so the run is limited only by time, and the finished part is always an even
+sample of the whole space (no corner left out). Each config: 2 warm-up + 5 measured pairs of operator plan vs
+baseline plan, Wayang's cost estimate stored next to each.
+
+**Why lanes do not spoil the measurements.** Each lane has its own CPUs, so lanes never take CPU time from each
+other; CPU time (the main cost signal) is per thread/process and unaffected. What lanes do share is the memory bus
+and the last-level cache, which can stretch wall time of memory-heavy operators by a few percent. Every row records
+its lane (`tag` = `lane-java-2` etc.), so a model or a check can compare lanes. On a server that other people use
+too, their jobs disturb any measurement more than the lanes do: `collect.log` records the load and other users' busy
+processes every 10 minutes.
+
+**For days without attention:** a lane whose runner crashes is restarted after 1 minute (it gives up after 10
+failures in a row; the other lanes go on); a config that hangs is killed after 30 minutes; a cut CSV line is
+repaired; `./collect.sh stop` / a crash / a reboot loses only the configs that were running, and
+`./collect.sh start` (no options needed) continues the same run with the same plan, lists and deadline.
+
+### Files to look at
+
+| File | |
+|---|---|
+| `collect/collect.log` | **the log**: environment, plan, every lane start / end / restart (with the last lines of a failure), status every 10 min, merges, validations |
+| `collect/STATUS.txt` | latest status: configs done / failed per lane and platform, configs per cluster size, rates, load |
+| `collect/data/<platform>/` | merged dataset: `raw.csv` (every run), `pairs.csv` (operator - baseline per pair), `operator_costs.csv` (per config, with Wayang's estimates), `baseline_costs.csv` |
+| `collect/data/validation.txt` | checks of the merged data (impossible values, missing estimates, noise) |
+| `collect/export/wayang-cost-data.tar.gz` | all of the above + every lane's run.log, in one file |
+| `collect/lanes/<lane>/run.log` | every config of that lane with times, and why one failed |
+| `test-run/test.log`, `prepare.log` | output of test.sh / prepare.sh |
+
+
 ## Files
 
 | File | What it does |
 |---|---|
+| `prepare.sh` | **server step 1** (the only online step, no root): Java 17, Wayang, Spark 3.5.7 jars, portable PostgreSQL, model packages, compiles the profilers |
+| `test.sh` | **server step 2** (offline, ~15 min): every part of the pipeline on small single-operator jobs, incl. Wayang's estimates |
+| `collect.sh` | **server step 3** (offline, days): all profilers at once in CPU-pinned lanes, clusters of 1..10 executors, merged dataset every 3 h |
+| `env.sh`, `plan_lanes.py`, `merge_lanes.py` | used by the three above: finds the tools / splits the machine into lanes / merges the lanes' data |
 | `make-bundle.sh` | **on the Mac**: packs Wayang, Spark 3.5, Java 17 for Linux (x64 + ARM, checksum-verified), both profilers and the model code into `dist/cost-model-server.tar.gz` (~1 GB) |
 | `setup-vm.sh` | **on the VM, once** (sudo): installs PostgreSQL and tools, starts the profiling database |
 | `run-server.sh` | **on the server**: `--check` tests everything; without it, runs Java, Spark (and with `--postgres local` PostgreSQL) in turns until the time limit |

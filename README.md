@@ -17,7 +17,7 @@ operator cost = operator run - baseline run   (per pair, then median over pairs)
 |---|---|---|
 | [java-profiler](java-profiler/README.md) | Wayang Java platform: one thread in one JVM | |
 | [spark-profiler](spark-profiler/README.md) | Wayang Spark platform (Spark 3.5.7) in local mode: a **single-node cluster**, driver and executor in one JVM, one task thread per core; or a standalone cluster of N executors | adds Spark task metrics: executor CPU, shuffle bytes, spill, peak execution memory |
-| [postgres-profiler](postgres-profiler/README.md) | Wayang PostgreSQL platform: filter, projection, join, global reduce, table sink, and the Postgres -> Java hand-off (`SqlToStream`) | Postgres operators become one SQL statement: measures connections, query, bytes on the wire, database CPU (Linux), EXPLAIN ANALYZE |
+| [postgres-profiler](postgres-profiler/README.md) | Wayang PostgreSQL platform: filter, projection, join, global reduce, table sink, and the Postgres -> Java hand-off (`SqlToStream`) | Postgres operators become one SQL statement: measures connections, query, bytes on the wire, database CPU (Linux and macOS, local server), EXPLAIN ANALYZE |
 
 ## File structure
 
@@ -96,7 +96,8 @@ Every CSV row starts with the **features** that describe the config:
 | `out_rows`, `out_bytes` | output size |
 | `cpu_model`, `cpus`, `machine_memory_bytes`, `java_version`, `jvm_args`, `gc_name`, `max_heap_bytes` | machine and JVM description |
 | Spark only: `spark_master`, `deploy_mode`, `task_slots`, `shuffle_partitions`, `in_partitions` | Spark setup: `local[*]`, `local-single-node`, cores, shuffle partitions (2 × cores), input partitions |
-| `cpu_signal_ok` (operator_costs only) | 1 if the CPU cost is larger than the measurement noise; drop rows with 0 |
+| `cpu_signal_ok`, `<metric>_signal_ok` | 1 if that cost (CPU; `wall_exec_ns`, `os_cycles`, `os_energy_nj`, ...) is larger than the measurement noise; drop rows with 0 for that target. In `operator_costs.csv` and `pairs.csv` |
+| `os_window` | `exec` = OS counters cover first record → job end (like `wall_exec_ns`); `run` = whole `execute()` calls |
 
 followed by the **measured resource usage**:
 
@@ -128,6 +129,10 @@ and **Wayang's estimates** for the same plan (read from Wayang's optimizer, not 
 | Settings | `wayang_cpu_mhz`, `wayang_cores`, `wayang_disk_ms_per_mb`, `wayang_network_ms_per_mb`, `wayang_cost_per_ms`, `wayang_cost_model` | | |
 
 Like the measured columns, they are operator plan − baseline plan in `pairs.csv` and `operator_costs.csv`.
+Disk cannot be compared on the current data: Wayang's Java estimates never contain disk bytes, and the input
+files are read from the warm OS file cache, so measured `os_disk_read_bytes` is ~0 (written bytes are real).
+Measuring cold reads needs `./run-profiling.sh --cold` (empties the file cache before every run, needs
+passwordless sudo).
 Wayang works from its own row-count guesses and default machine settings, so the gap to the measured cost
 mixes cardinality and cost-formula errors. Details:
 [java-profiler/README.md](java-profiler/README.md#wayangs-own-estimates). Rows measured before these columns

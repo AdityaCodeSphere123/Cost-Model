@@ -92,4 +92,4 @@ echo "Archive"
 tar -C "$OUT" -czf "$OUT/cost-model-server.tar.gz" cost-model-server
 du -sh "$B" "$OUT/cost-model-server.tar.gz"
 echo "Copy to the server:  scp $OUT/cost-model-server.tar.gz user@server:"
-echo "Then on the server:  tar xzf cost-model-server.tar.gz && cd cost-model-server/Cost-Model/server && ./setup-vm.sh && ./run-server.sh --check --postgres local"
+echo "Then on the server:  tar xzf cost-model-server.tar.gz && cd cost-model-server/Cost-Model/server && ./prepare.sh && ./test.sh"

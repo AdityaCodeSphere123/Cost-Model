@@ -42,7 +42,7 @@ Stopping and restarting continues where it left off.
 |---|---|
 | `raw.csv` | every measured run, baseline and operator |
 | `pairs.csv` | one row per pair: features + (operator − baseline) for every metric |
-| `operator_costs.csv` | one row per config: median difference and its IQR; `cpu_signal_ok` = cost larger than noise |
+| `operator_costs.csv` | one row per config: median difference and its IQR; `cpu_signal_ok` = cost larger than noise, and the same flag for `wall_exec_ns`, `os_cycles`, `os_energy_nj` (`<metric>_signal_ok`, also copied into `pairs.csv`) |
 | `baseline_costs.csv` | the baseline itself, which is the cost of source + parse + sink |
 | `run.log` | full JVM output |
 
@@ -64,10 +64,16 @@ GC columns have the same names for every garbage collector: `gc_young_*` (G1 you
 
 `*_exec_*` columns start at the first record, so they leave out Wayang's plan optimization; `*_total_*`
 cover the whole `execute()` call. `thread_*` columns count only the thread that runs the operator.
-`os_*` columns count the whole JVM process, including JIT and GC threads, so they are noisier.
+`os_*` columns count the whole JVM process (all threads, including JIT and GC) over the exec window.
 
-**What each column's time window covers.** Only the `*_exec_*` columns (plus `thread_*`) are limited to running
-the plan. `wall_total_ns`, `process_cpu_ns`, `jit_compile_ms`, `gc_*` and all `os_*` columns cover the whole
+**What each column's time window covers.** The `*_exec_*` columns (plus `thread_*`) and, since 12 Nov 2026, the
+`os_*` counters are limited to running the plan: from the first record to the end of the job. The OS counters are
+read right there through the `pidrusage` helper, which stays running (`--serve`, ~20 µs per reading), so `os_cycles`,
+`os_instructions` and `os_energy_nj` measure the same work as `process_cpu_exec_ns` (checked: OS CPU = JVM exec CPU
+within 0–2%). `os_window` says which window a row used: `exec`, or `run` (the whole `execute()` calls, only if the
+first record could not be seen, e.g. Spark in cluster mode). Rows measured before had a wider OS window (Wayang's
+optimizer, a 50 ms pause and the JIT/GC work after the run): up to ~100 ms of extra CPU per run, noise in `pairs.csv`.
+`wall_total_ns`, `process_cpu_ns`, `jit_compile_ms` and `gc_*` still cover the whole
 `execute()` call, which includes Wayang's optimizer. The optimizer takes longer for the operator plan than for
 the baseline (one more operator to plan), so in `pairs.csv` these columns carry some optimizer cost: on the
 laptop data a median of 0.8 ms (Java) / 3.4 ms (Spark) per pair, about 17% of the operator's own `wall_exec_ns`.

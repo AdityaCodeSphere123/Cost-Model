@@ -1,1 +1,8 @@
 dist/
+results-server/
+results-cluster/
+export/
+collect/
+test-run/
+.deps/
+prepare.log

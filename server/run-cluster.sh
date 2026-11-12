@@ -47,6 +47,9 @@ PIN=1
 ANALYZE_EVERY=3
 CORES=""
 MEM_GB=""
+CPU_LIST=""     # --cpus: the logical CPUs this run may use (default 0..CORES-1)
+SHARED=0        # --shared: other profiling lanes run on other CPUs of this machine (collect.sh)
+GIVEN_LIST=""   # --list: a fixed config list instead of the random one (test.sh)
 PYTHON="${PYTHON:-python3}"
 
 usage() { sed -n '2,/^[^#]/p' "$0" | grep '^#' | sed 's/^# \{0,1\}//'; cat <<EOF
@@ -66,6 +69,10 @@ Options
   --no-pin               do not pin workers and driver to cores (taskset)
   --cores N / --mem-gb N plan for this many cores / GB RAM (default: this machine)
   --out DIR              output folder (default $OUT)
+  --cpus LIST            logical CPUs to use, e.g. "0-31" or "0,32,1,33" (driver gets the first --reserve of them,
+                         executor i the next C); default: 0 .. cores-1
+  --shared               allow other profiling runs on the other CPUs of this machine (used by collect.sh)
+  --list FILE            run this config list (lines DRIVERHEAP:G1:NxC|op|...) instead of a random one
   --check                only test that everything works
 EOF
 }
@@ -88,6 +95,9 @@ while [[ $# -gt 0 ]]; do
     --cores) CORES="$2"; shift 2 ;;
     --mem-gb) MEM_GB="$2"; shift 2 ;;
     --out) OUT="$2"; shift 2 ;;
+    --cpus) CPU_LIST="$2"; shift 2 ;;
+    --shared) SHARED=1; shift ;;
+    --list) GIVEN_LIST="$(cd "$(dirname "$2")" && pwd)/$(basename "$2")"; shift 2 ;;
     --check) CHECK=1; shift ;;
     -h|--help) usage; exit 0 ;;
     *) echo "Unknown option: $1"; usage; exit 2 ;;
@@ -103,11 +113,23 @@ fail() { say "ERROR: $*"; exit 1; }
 
 # ---- one profiling job per machine ---------------------------------------------------------------
 others=$(pgrep -f "run-server.sh|OperatorProfiler" 2>/dev/null | grep -v "^$$\$" || true)
-[[ -z "$others" ]] || fail "another profiling run is active on this machine (pids: $(echo $others)). Two runs at once
+(( SHARED )) || [[ -z "$others" ]] || fail "another profiling run is active on this machine (pids: $(echo $others)). Two runs at once
        share CPUs and disturb each other's timings: stop it first (pkill -f run-server.sh; pkill -f OperatorProfiler)."
 
 # ---- machine and tools ---------------------------------------------------------------------------
+# The CPUs, expanded to one number each ("0-3,8" -> 0 1 2 3 8).
+if [[ -n "$CPU_LIST" ]]; then
+  read -r -a CPUS_ARR <<<"$("$PYTHON" -c '
+import sys
+out = []
+for part in sys.argv[1].split(","):
+    a, _, b = part.partition("-")
+    out += list(range(int(a), int(b or a) + 1))
+print(" ".join(map(str, out)))' "$CPU_LIST")"
+  CORES=${#CPUS_ARR[@]}
+fi
 if [[ -z "$CORES" ]]; then CORES=$(nproc 2>/dev/null || sysctl -n hw.ncpu); fi
+[[ -n "$CPU_LIST" ]] || read -r -a CPUS_ARR <<<"$(seq -s ' ' 0 $((CORES - 1)))"
 if [[ -z "$MEM_GB" ]]; then
   if [[ -r /proc/meminfo ]]; then MEM_GB=$(( $(awk '/MemTotal/ {print $2}' /proc/meminfo) / 1024 / 1024 ))
   else MEM_GB=$(( $(sysctl -n hw.memsize) / 1073741824 )); fi
@@ -179,6 +201,11 @@ done
 DAEMON_CP="$SPARK_HOME_DIR/conf:$SPARK_HOME_DIR/jars/*"
 
 # ---- shapes and memory ---------------------------------------------------------------------------
+if [[ -n "$GIVEN_LIST" ]]; then
+  [[ -s "$GIVEN_LIST" ]] || fail "--list $GIVEN_LIST is empty or missing"
+  SHAPES=$(cut -d'|' -f1 "$GIVEN_LIST" | cut -d: -f3 | awk '!seen[$0]++' | xargs)
+  DRIVER_HEAP=$(head -1 "$GIVEN_LIST" | cut -d: -f1)
+fi
 USABLE=$(( CORES - RESERVE ))
 (( USABLE >= 2 )) || fail "only $CORES cores: nothing left after --reserve $RESERVE"
 if [[ -z "$SHAPES" ]]; then
@@ -205,7 +232,12 @@ fi
 
 # ---- cluster control -----------------------------------------------------------------------------
 pin() { (( PIN )) && echo "taskset -c $1"; }
-DRIVER_CPUS="0-$((RESERVE - 1))"
+cpu_slice() {  # first count -> "a,b,c": the logical CPUs number first .. first+count-1 of this run
+  local i out=""
+  for (( i = $1; i < $1 + $2; i++ )); do out="$out,${CPUS_ARR[$i]}"; done
+  echo "${out#,}"
+}
+DRIVER_CPUS=$(cpu_slice 0 "$RESERVE")
 
 master_status() {  # prints "<alive workers> <status> <active apps>", or nothing if the master is not reachable
   "$PYTHON" - "$UI_PORT" 2>/dev/null <<'PY'
@@ -234,9 +266,10 @@ start_workers() {  # N C
   WORKER_PIDS=()
   for i in $(seq 0 $((n - 1))); do
     lo=$(( RESERVE + i * c ))
+    local cpus; cpus=$(cpu_slice "$lo" "$c")
     rm -rf "$OUT/work/w$i" "$OUT/local/w$i"; mkdir -p "$OUT/work/w$i" "$OUT/local/w$i"
     # shellcheck disable=SC2046
-    SPARK_LOCAL_DIRS="$OUT/local/w$i" nohup $(pin "$lo-$(( lo + c - 1 ))") "$JAVA" -Xmx256m $OPENS -cp "$DAEMON_CP" \
+    SPARK_LOCAL_DIRS="$OUT/local/w$i" nohup $(pin "$cpus") "$JAVA" -Xmx256m $OPENS -cp "$DAEMON_CP" \
       org.apache.spark.deploy.worker.Worker --host 127.0.0.1 --cores "$c" --memory "${EXEC_MEM_GB}g" \
       --work-dir "$OUT/work/w$i" --webui-port 0 "$MASTER_URL" >"$OUT/logs/worker-$i.log" 2>&1 &
     WORKER_PIDS+=($!)
@@ -259,7 +292,8 @@ stop_workers() {
     sleep 0.5
   done
   for p in ${WORKER_PIDS[@]+"${WORKER_PIDS[@]}"}; do kill -9 "$p" 2>/dev/null; done
-  pkill -f "CoarseGrainedExecutorBackend.*spark://CoarseGrainedScheduler@127.0.0.1" 2>/dev/null  # orphans, if any
+  # Orphan executors of this run only (their class path is this run's SPARK_HOME; other lanes have their own).
+  pkill -f "$SPARK_HOME_DIR/.*CoarseGrainedExecutorBackend|CoarseGrainedExecutorBackend.*$SPARK_HOME_DIR/" 2>/dev/null
   WORKER_PIDS=()
   for _ in $(seq 1 30); do [[ "$(master_status | awk '{print $1}')" == 0 ]] && break; sleep 1; done
   rm -rf "$OUT/work" "$OUT/local"
@@ -370,7 +404,10 @@ fi
 # ---- the long run --------------------------------------------------------------------------------
 machine_report
 mkdir -p "$OUT/lists" "$OUT/spark-cluster"
-if [[ ! -s "$OUT/cluster.list" ]]; then
+if [[ -n "$GIVEN_LIST" && ! -s "$OUT/cluster.list" ]]; then
+  cp "$GIVEN_LIST" "$OUT/cluster.list"
+  for s in $SHAPES; do grep -F ":$s|" "$OUT/cluster.list" >"$OUT/lists/$s.list"; done
+elif [[ ! -s "$OUT/cluster.list" ]]; then
   "$PYTHON" "$HERE/sweep.py" --platform spark-cluster --shapes "$SHAPES" --driver-heap "$DRIVER_HEAP" \
     --executor-memory-gb "$EXEC_MEM_GB" --count "$COUNT" --seed "$SEED" >"$OUT/cluster.list" 2>>"$LOG" || fail "sweep.py failed"
   for s in $SHAPES; do grep -F ":$s|" "$OUT/cluster.list" >"$OUT/lists/$s.list"; done

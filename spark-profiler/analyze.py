@@ -29,7 +29,7 @@ ID_COLS = [
     "machine_memory_bytes", "java_version", "jvm_args", "gc_name", "max_heap_bytes", "os_probe",
     # Wayang settings used to turn its load estimates into time and cost
     "wayang_cpu_mhz", "wayang_cores", "wayang_disk_ms_per_mb", "wayang_network_ms_per_mb", "wayang_cost_per_ms",
-    "wayang_cost_model",
+    "wayang_cost_model", "os_window",
     "spark_version", "spark_master", "deploy_mode", "executors", "task_slots", "shuffle_partitions",
     "in_partitions", "right_in_partitions", "serializer",
     # cluster shape and how the run was measured
@@ -59,6 +59,23 @@ SIGNAL_COL = "task_cpu_ns"
 
 # A run is disturbed if the hypervisor "stole" more than this share of the machine's CPU time (Linux VMs only).
 MAX_STEAL = 0.02
+
+
+# Besides cpu_signal_ok: one <metric>_signal_ok flag per main metric. 1 = the operator's median cost is clearly
+# larger than the spread between pairs, 0 = mostly noise (e.g. a cheap map next to the cost of reading the input),
+# empty = fewer than 3 pairs. operator_costs.csv and pairs.csv carry them, so users of the data can drop noisy rows
+# per target instead of reading noise as a real (or negative) cost.
+SIGNAL_METRICS = ["wall_exec_ns", "process_cpu_exec_ns", "os_cycles", "os_energy_nj"]
+
+
+def signal(values):
+    """(ok, signal_to_noise) of a list of per-pair differences, as strings for the CSV."""
+    values = [v for v in values if v is not None]
+    if len(values) < 3:
+        return "", ""
+    med, iqr = statistics.median(values), quantile(values, 0.75) - quantile(values, 0.25)
+    ok = med > 0 and (iqr == 0 or med > iqr)
+    return str(int(ok)), (fmt(abs(med) / iqr) if iqr > 0 else "inf")
 
 
 def steal_share(r):
@@ -154,8 +171,6 @@ def main():
         by_config[o["config_id"]].append((o, b, delta))
 
     # pairs.csv
-    pair_header = id_cols + ["run_id", "pair"] + OPERATOR_SIDE + ["baseline_out_rows"] + metric_cols
-    write_csv(os.path.join(out_dir, "pairs.csv"), pair_header, pair_rows)
 
     # operator_costs.csv and baseline_costs.csv
     cost_rows, base_rows = [], []
@@ -190,6 +205,8 @@ def main():
             rec["cpu_signal_ok"] = int(med > 0 and (iqr == 0 or med > iqr))
         else:
             rec["cpu_signal_to_noise"], rec["cpu_signal_ok"] = "", ""
+        for c in SIGNAL_METRICS:
+            rec[c + "_signal_ok"], rec[c + "_signal_to_noise"] = signal([d.get(c) for _, _, d in items])
         cost_rows.append(rec)
         base_rows.append(brec)
 
@@ -198,10 +215,19 @@ def main():
                           num(r.get("sel")) or 0, num(r.get("words")) or 0)
     cost_rows.sort(key=sort_key)
     base_rows.sort(key=sort_key)
-    cost_header = id_cols + ["n_pairs"] + OPERATOR_SIDE + ["cpu_signal_ok", "cpu_signal_to_noise"]
+    cost_header = id_cols + ["n_pairs"] + OPERATOR_SIDE + ["cpu_signal_ok", "cpu_signal_to_noise"] + \
+        [x for c in SIGNAL_METRICS for x in (c + "_signal_ok", c + "_signal_to_noise")]
     for c in metric_cols:
         cost_header += [c, c + "_iqr"]
     write_csv(os.path.join(out_dir, "operator_costs.csv"), cost_header, cost_rows)
+    flags = ["cpu_signal_ok"] + [c + "_signal_ok" for c in SIGNAL_METRICS]
+    by_id = {r["config_id"]: r for r in cost_rows}
+    for p in pair_rows:
+        cfg = by_id.get(p["config_id"], {})
+        for k in flags:
+            p[k] = cfg.get(k, "")
+    pair_header = id_cols + ["run_id", "pair"] + OPERATOR_SIDE + ["baseline_out_rows"] + metric_cols + flags
+    write_csv(os.path.join(out_dir, "pairs.csv"), pair_header, pair_rows)
     write_csv(os.path.join(out_dir, "baseline_costs.csv"), id_cols + ["n_runs", "out_rows"] + metric_cols, base_rows)
 
     print(f"pairs: {len(pair_rows)}  configs: {len(cost_rows)}  unpaired runs dropped: {dropped}  "

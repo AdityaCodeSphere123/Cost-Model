@@ -35,6 +35,9 @@ while [[ $# -gt 0 ]]; do
 done
 
 find_bin() {
+  # PGBIN, then the portable PostgreSQL that ../server/prepare.sh downloads (no root needed), then installed ones.
+  if [[ -n "${PGBIN:-}" && -x "$PGBIN/pg_ctl" ]]; then echo "$PGBIN"; return; fi
+  if [[ -x "$HERE/../.deps/postgres/bin/pg_ctl" ]]; then (cd "$HERE/../.deps/postgres/bin" && pwd); return; fi
   if command -v pg_ctl >/dev/null; then dirname "$(command -v pg_ctl)"; return; fi
   local d
   for d in $(ls -d /usr/lib/postgresql/*/bin /usr/pgsql-*/bin /opt/homebrew/opt/postgresql@*/bin \
@@ -63,6 +66,9 @@ if [[ ! -s "$PGDATA_DIR/PG_VERSION" ]]; then
     echo "autovacuum = off"
     [[ -n "$SHARED_BUFFERS" ]] && echo "shared_buffers = '$SHARED_BUFFERS'"
   } >>"$PGDATA_DIR/postgresql.conf"
+  # The database, created in single-user mode before the first start: works without psql (the portable build has none).
+  echo "CREATE DATABASE wayangprof;" | "$BIN/postgres" --single -D "$PGDATA_DIR" postgres >/dev/null 2>&1 \
+    || echo "note: could not create the database in single-user mode; trying psql after the start" >&2
 fi
 if "$BIN/pg_ctl" -D "$PGDATA_DIR" status >/dev/null 2>&1; then
   [[ "$ACTION" == url ]] || echo "already running"
@@ -71,9 +77,9 @@ else
     || { tail -20 "$PGDATA_DIR/server.log"; exit 1; }
 fi
 PORT=$(awk -F= '/^port =/ {gsub(/ /, "", $2); p=$2} END {print p}' "$PGDATA_DIR/postgresql.conf")
-if ! "$BIN/psql" -h 127.0.0.1 -p "$PORT" -U "$PGUSER_NAME" -d postgres -Atc "SELECT 1 FROM pg_database WHERE datname = 'wayangprof'" | grep -q 1; then
+if [[ -x "$BIN/psql" ]] && ! "$BIN/psql" -h 127.0.0.1 -p "$PORT" -U "$PGUSER_NAME" -d postgres -Atc "SELECT 1 FROM pg_database WHERE datname = 'wayangprof'" | grep -q 1; then
   "$BIN/psql" -h 127.0.0.1 -p "$PORT" -U "$PGUSER_NAME" -d postgres -qc "CREATE DATABASE wayangprof"
 fi
 if [[ "$ACTION" == url ]]; then echo "postgresql://127.0.0.1:$PORT/wayangprof"; exit 0; fi
-echo "PostgreSQL $("$BIN/psql" -h 127.0.0.1 -p "$PORT" -U "$PGUSER_NAME" -d wayangprof -Atc 'SHOW server_version') running:"
+echo "$("$BIN/postgres" --version) running:"
 echo "  --url postgresql://127.0.0.1:$PORT/wayangprof --user $PGUSER_NAME     (data: $PGDATA_DIR, log: $PGDATA_DIR/server.log)"

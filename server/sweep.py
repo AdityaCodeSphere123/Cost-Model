@@ -49,9 +49,11 @@ def fits_heap(op, rows, right, words, heap):
     return need < heap_bytes(heap) * 0.6
 
 
-def settings(platform, cores, mem_gb):
-    # Each heap must leave room for the OS, Spark's off-heap memory and the page cache: at most a third of RAM.
-    heaps = [h for h in ("2g", "4g", "8g", "16g") if int(h[:-1]) <= mem_gb / 3] or ["1g"]
+def settings(platform, cores, mem_gb, max_heap_gb=None):
+    # Each heap must leave room for the OS, Spark's off-heap memory and the page cache: at most a third of RAM
+    # (or --max-heap-gb, when several profiling lanes share the machine and each has its own memory budget).
+    limit = max_heap_gb if max_heap_gb else mem_gb / 3
+    heaps = [h for h in ("2g", "4g", "8g", "16g") if int(h[:-1]) <= limit] or ["1g"]
     main_heap = "8g" if "8g" in heaps else heaps[-1]
     core_opts = sorted({c for c in (1, 2, 4, 8, 16, 32, 64) if c <= cores} | {cores})
     if platform == "java":  # one operator thread; cores only change GC/JIT threads, so fewer options
@@ -165,6 +167,7 @@ def main():
     ap.add_argument("--shapes", help='spark-cluster: cluster shapes "NxC ...", e.g. "1x6 2x6 3x6"')
     ap.add_argument("--driver-heap", default="8g", help="spark-cluster: heap of the driver (default 8g)")
     ap.add_argument("--executor-memory-gb", type=int, default=4, help="spark-cluster: heap of each executor")
+    ap.add_argument("--max-heap-gb", type=float, help="java, spark: largest heap to use (default: a third of --mem-gb)")
     args = ap.parse_args()
     rng = random.Random(args.seed)
     if args.platform == "spark-cluster":
@@ -182,7 +185,7 @@ def main():
         print(f"# postgres: {len(out)} configs, seed {args.seed}", file=sys.stderr)
         print("\n".join(out))
         return
-    main_res, others = settings(args.platform, args.cores, args.mem_gb)
+    main_res, others = settings(args.platform, args.cores, args.mem_gb, args.max_heap_gb)
     seen, out = set(), []
     # Operators round-robin (reshuffled each round), so every prefix of the list is balanced across
     # operators: a run that only gets through the first 15k configs is still an even sample.

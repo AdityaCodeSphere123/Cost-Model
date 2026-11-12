@@ -51,6 +51,11 @@ Operators: map, filter, flatmap, reduceby, groupby, globalreduce, count, distinc
   the driver one partition at a time. That would make the sink the slowest part and run the whole plan on
   one thread. The profiler uses its own `CountingSink` instead: it runs `rdd.count()`, so all partitions
   are read on all cores and only one number goes back to the driver. The same sink is in both plans.
+  Wayang's estimate for it is Wayang's own `wayang.spark.count.load` (what `SparkCountOperator`, which also runs
+  `rdd.count()`, is estimated with), registered as `wayang.spark.countingsink.load` with 0 outputs. Before
+  12 Nov 2026 it used `localcallbacksink.load`, which charges 4000 cycles and 4.5 network bytes per row for
+  collecting every row to the driver, work that never ran. That made Wayang's operator − baseline estimate
+  negative for operators that drop rows (count, globalreduce, reduceby, filter) in 438 of 795 pairs.
 - **"exec" metrics start at the first record.** `wall_exec_ns`, `process_cpu_exec_ns` and
   `total_alloc_exec_bytes` start when the first row leaves the source, so they leave out Wayang's plan
   optimization and Spark's job setup. `*_total_*` and `process_cpu_ns` cover the whole `execute()` call.
@@ -113,7 +118,7 @@ Spark task threads (`local[CORES]`) or `all`. Stopping and restarting continues 
 |---|---|
 | `raw.csv` | every measured run, baseline and operator |
 | `pairs.csv` | one row per pair: features + (operator − baseline) for every metric |
-| `operator_costs.csv` | one row per config: median difference and its IQR; `cpu_signal_ok` = task CPU cost larger than noise |
+| `operator_costs.csv` | one row per config: median difference and its IQR; `cpu_signal_ok` = task CPU cost larger than noise, and the same flag for `wall_exec_ns`, `process_cpu_exec_ns`, `os_cycles`, `os_energy_nj` (`<metric>_signal_ok`, also copied into `pairs.csv`) |
 | `baseline_costs.csv` | the baseline itself, which is the cost of source + parse + sink |
 | `run.log` | full JVM output |
 
@@ -155,8 +160,14 @@ GC columns have the same names for every garbage collector: `gc_young_*` (G1 you
 All `os_*` and `process_*` columns count the whole JVM, which here includes the driver, the executor, and
 the GC and JIT threads.
 
-**What each column's time window covers.** Only the `*_exec_*` columns (plus `thread_*`) are limited to running
-the plan. `wall_total_ns`, `process_cpu_ns`, `jit_compile_ms`, `gc_*` and all `os_*` columns cover the whole
+**What each column's time window covers.** The `*_exec_*` columns (plus `thread_*`) and, since 12 Nov 2026, the
+`os_*` counters are limited to running the plan: from the first record to the end of the job. The OS counters are
+read right there through the `pidrusage` helper, which stays running (`--serve`, ~20 µs per reading), so `os_cycles`,
+`os_instructions` and `os_energy_nj` measure the same work as `process_cpu_exec_ns` (checked: OS CPU = JVM exec CPU
+within 0–2%). `os_window` says which window a row used: `exec`, or `run` (the whole `execute()` calls, only if the
+first record could not be seen, e.g. Spark in cluster mode). Rows measured before had a wider OS window (Wayang's
+optimizer, a 50 ms pause and the JIT/GC work after the run): up to ~100 ms of extra CPU per run, noise in `pairs.csv`.
+`wall_total_ns`, `process_cpu_ns`, `jit_compile_ms` and `gc_*` still cover the whole
 `execute()` call, which includes Wayang's optimizer. The optimizer takes longer for the operator plan than for
 the baseline (one more operator to plan), so in `pairs.csv` these columns carry some optimizer cost: on the
 laptop data a median of 0.8 ms (Java) / 3.4 ms (Spark) per pair, about 17% of the operator's own `wall_exec_ns`.

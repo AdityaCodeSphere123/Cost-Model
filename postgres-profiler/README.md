@@ -56,7 +56,7 @@ and, via a counting socket, the bytes on the wire. Nothing per row is wrapped, s
 | | `wall_connect_ns`, `wall_query_ns`, `wall_client_ns` | its parts: opening connections (server process start, login) / statement calls (database work + receiving all rows: the driver reads the whole result) / the rest (Java turns rows into Records, sink, Wayang) |
 | | `wall_total_ns` | the whole `execute()`, incl. Wayang's optimizer |
 | Network | `network_bytes_in`, `network_bytes_out`, `network_bytes` | bytes Postgres -> Java (result rows) and Java -> Postgres, counted on the socket |
-| Database CPU | `db_backend_cpu_ns`, `db_parallel_cpu_ns`, `db_cpu_ns` | **Linux, database on this machine**: the server process of each connection, read from `/proc` just before it closes; the parallel query workers (separate processes) from the postmaster's "CPU of exited children" counter |
+| Database CPU | `db_backend_cpu_ns`, `db_parallel_cpu_ns`, `db_cpu_ns` | **Database on this machine, same OS user**: the server process of each connection, read just before it closes, in ns (Linux `/proc/PID/schedstat`, macOS the `pidrusage` helper); the parallel query workers (separate processes) from the postmaster's "CPU of exited children" counter (macOS ns, Linux 10 ms ticks). `db_parallel_cpu_ns` also holds each server process's own exit work (~1 ms per connection) |
 | Database disk | `db_disk_read_bytes`, `db_disk_write_bytes` | the server processes' `/proc/PID/io` (needs the profiler to run as the database's OS user) |
 | EXPLAIN | `db_explain_exec_ms`, `db_explain_planning_ms`, `db_explain_jit_ms`, `db_shared_hit_blocks`, `db_shared_read_blocks`, `db_temp_read_blocks`, `db_temp_written_blocks` (spill), `db_workers_launched`, `db_explain_rows`, `db_plan` (e.g. `Hash Join(Seq Scan,Hash(Seq Scan))`) | one extra, untimed `EXPLAIN (ANALYZE, BUFFERS, TIMING OFF)` of each plan's SQL (median of 3), same session settings. Server-side only: no transfer to Java |
 | Java side | `thread_cpu_exec_ns`, `process_cpu_exec_ns`, `thread_alloc_exec_bytes`, GC/JIT, heap pools, `os_*` | as in the Java profiler (the Java side runs on one thread) |
@@ -121,4 +121,6 @@ configs as failed. In the long server run: `../server/run-server.sh --postgres p
 - `cpu_signal_ok` in `operator_costs.csv` is based on `wall_exec_ns` and its size (either sign) here.
 - Each run opens two connections (Wayang's `JdbcExecutor` and `SqlToStream`; four for the join baseline), each ~2-5 ms:
   in both plans, so mostly cancelled, except for join, whose baseline runs two jobs.
-- macOS: no `/proc`, so database CPU and disk stay empty; everything else works.
+- macOS: database CPU and disk come from the `pidrusage` helper (the server must run as the same OS user, as
+  `start-local-postgres.sh` does).
+- `os_*` columns (the JVM side) cover the exec window (first execution connection to job end), see `os_window`.

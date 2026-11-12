@@ -106,6 +106,8 @@ allowed_cpus() {
 }
 mem_budget() {
   if [[ -n "$MEM_GB" ]]; then echo "$MEM_GB"; return; fi
+  # --test runs fixed tiny lists (1-2 GB heaps): the plan's sizes do not matter, it must only fit the test lanes.
+  if (( TEST )); then echo 40; return; fi
   if [[ -r /proc/meminfo ]]; then awk '/MemAvailable/ {printf "%d", $2 / 1048576 * 0.85}' /proc/meminfo
   else echo $(( $(sysctl -n hw.memsize) / 1073741824 * 6 / 10 )); fi
 }
@@ -386,7 +388,7 @@ kill_tree() {  # pid...: TERM to all of them and their descendants, KILL after 1
 }
 kill_leftovers() {  # processes of this run left over from a crash (not the PostgreSQL servers: they are reused)
   local p pids=()
-  for p in $(pgrep -u "$(id -u)" -f "$RUN/lanes/" 2>/dev/null); do
+  for p in $(pgrep -u "$(id -u)" -f "$RUN/(lanes|calibration)/" 2>/dev/null); do  # calibration: stop before the lanes start
     [[ "$p" == "$$" ]] && continue
     [[ "$(ps -o comm= -p "$p" 2>/dev/null)" == postgres* ]] && continue
     pids+=("$p")

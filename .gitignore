@@ -7,3 +7,4 @@ test-run/
 .deps/
 prepare.log
 .measure.lock/
+__pycache__/

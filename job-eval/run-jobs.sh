@@ -23,8 +23,13 @@ for p in java.lang java.lang.invoke java.lang.reflect java.io java.net java.nio 
          java.util.concurrent.atomic sun.nio.ch sun.nio.cs sun.security.action sun.util.calendar; do
   OPENS+=("--add-opens=java.base/$p=ALL-UNNAMED")
 done
+# Measure only on a machine fit to measure: mains power, no other profiler running (../common/measure-gate.sh).
+# shellcheck source=../common/measure-gate.sh
+source "$HERE/../common/measure-gate.sh"
+gate_enter
 # Same JVM setting as the profilers' main resource (4g heap, G1, all cores).
 "$JAVA" -Xms4g -Xmx4g -XX:+UseG1GC "${OPENS[@]}" -Dlog4j.configurationFile="file://$HERE/../spark-profiler/log4j2-quiet.xml" \
   -Dspark.local.dir="$HERE/results/tmp-spark" -cp "$HERE/build:$CP" wayangprof.JobBench \
   "$HERE/../java-profiler/data" "${OUT:-$HERE/results}" "${1:-1}" "${2:-3}" ${3:+"$3"} 2>&1 | grep "\[jobbench\]\|Exception\|Error"
 rm -rf "$HERE/results/tmp-spark"
+gate_leave

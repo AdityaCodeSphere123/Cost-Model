@@ -76,4 +76,5 @@ gate_enter() {
 gate_leave() {
   if (( GATE_HELD )) && [[ "$(cat "$GATE_LOCK/pid" 2>/dev/null)" == "$$" ]]; then rm -rf "$GATE_LOCK"; fi
   GATE_HELD=0
+  return 0  # safe under set -e
 }

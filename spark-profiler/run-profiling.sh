@@ -26,7 +26,9 @@
 #   HEAP   JVM heap (-Xms and -Xmx), e.g. 2g, 4g, 8g. Driver and executor share it in local mode.
 #   GC     G1 | Parallel | Serial | Z   (garbage collector)
 #   CORES  Spark task threads, local[CORES] (also limits the JVM to that many CPUs), or "all" = local[*]
-# Wayang uses 2 x CORES partitions for shuffles (reduceby, groupby, join, sort, distinct).
+#          or NxC = a standalone cluster of N executors with C cores each (needs --master; the driver
+#          gets HEAP and GC, every executor --executor-memory). See ../server/run-cluster.sh.
+# Wayang uses 2 x CORES (cluster: 2 x N x C) partitions for shuffles (reduceby, groupby, join, sort, distinct).
 #
 # The run can be stopped and restarted: configs already in raw.csv are skipped (use --no-resume to redo).
 set -uo pipefail
@@ -71,6 +73,9 @@ EPHEMERAL=0
 COLD=0
 TAG=""
 JAVA_EXTRA="${JAVA_EXTRA:-}"
+MASTER="${SPARK_MASTER_URL:-}"   # spark://host:port, for NxC resources
+EXEC_MEM="4g"                    # heap of each executor, for NxC resources
+JAVA_PREFIX="${JAVA_PREFIX:-}"   # put before the driver's java command, e.g. "taskset -c 0-3"
 
 usage() {
   sed -n '2,/^[^#]/p' "$0" | grep '^#' | sed 's/^# \{0,1\}//'
@@ -98,8 +103,11 @@ Options
   --hours H                      stop starting new configs after H hours (the running one finishes)
   --ephemeral-inputs             delete each generated input file after its config (long sweeps: saves disk)
   --no-analyze                   do not run analyze.py at the end
+  --master spark://HOST:PORT     standalone master for NxC resources (cluster mode)
+  --executor-memory M            heap of each executor in cluster mode (default: $EXEC_MEM)
 Environment: PROFILER_ARGS (extra profiler arguments, e.g. "--work 20000"), WAYANG_HOME, WAYANG_SRC, JAVA_HOME, SPARK_JARS (classpath of Spark 3.5 jars, optional),
-             HOST_LABEL (machine label for the host column), JAVA_EXTRA (more JVM flags), PYTHON
+             HOST_LABEL (machine label for the host column), JAVA_EXTRA (more JVM flags), PYTHON,
+             SPARK_MASTER_URL (same as --master), JAVA_PREFIX (command before the driver's java, e.g. taskset -c 0-3)
 EOF
 }
 
@@ -124,6 +132,8 @@ while [[ $# -gt 0 ]]; do
     --hours) HOURS="$2"; shift 2 ;;
     --ephemeral-inputs) EPHEMERAL=1; shift ;;
     --no-analyze) ANALYZE=0; shift ;;
+    --master) MASTER="$2"; shift 2 ;;
+    --executor-memory) EXEC_MEM="$2"; shift 2 ;;
     -h|--help) usage; exit 0 ;;
     *) echo "Unknown option: $1"; usage; exit 2 ;;
   esac
@@ -206,7 +216,12 @@ resource_cores() { # 4g:G1:all -> all
   echo "${c:-all}"
 }
 
-resource_flags() { # 4g:G1:4 -> JVM flags
+is_cluster() { # 4g:G1:2x6 -> true
+  IFS=: read -r _ _ c <<<"$1"
+  [[ "$c" =~ ^[1-9][0-9]*x[1-9][0-9]*$ ]]
+}
+
+resource_flags() { # 4g:G1:4 -> JVM flags (of the driver, in cluster mode)
   IFS=: read -r h g c <<<"$1"
   local f="-Xms$h -Xmx$h"
   case "$g" in
@@ -216,8 +231,10 @@ resource_flags() { # 4g:G1:4 -> JVM flags
     Z) f="$f -XX:+UseZGC" ;;
     *) echo "Unknown GC '$g' in resource '$1'" >&2; return 1 ;;
   esac
-  if [[ "$c" != "all" ]]; then
-    [[ "$c" =~ ^[1-9][0-9]*$ ]] || { echo "CORES must be a number or all in resource '$1'" >&2; return 1; }
+  if is_cluster "$1"; then
+    [[ -n "$MASTER" ]] || { echo "resource '$1' is a cluster (NxC): --master spark://HOST:PORT is needed" >&2; return 1; }
+  elif [[ "$c" != "all" ]]; then
+    [[ "$c" =~ ^[1-9][0-9]*$ ]] || { echo "CORES must be a number, all or NxC in resource '$1'" >&2; return 1; }
     f="$f -XX:ActiveProcessorCount=$c"
   fi
   echo "$f"
@@ -285,6 +302,7 @@ add() { CONFIGS+=("$*"); }
 
 for res in $RESOURCES; do
   hb=$(heap_bytes "${res%%:*}")
+  is_cluster "$res" && hb=$(heap_bytes "$EXEC_MEM")  # the data is held by the executors
   for src in $SOURCES; do
     for op in $OPS; do
       for n in $ROWS; do
@@ -358,6 +376,8 @@ JV=$("$JAVA" -version 2>&1 | head -1 | sed -E 's/.*version "([0-9]+).*/\1/')
 (( JV >= 14 )) || { echo "Java 14 or newer is needed (found $JV)"; exit 1; }
 
 mkdir -p "$OUT_DIR" "$DATA_DIR" "$BUILD"
+# A cluster on this machine listens on 127.0.0.1 only; the driver must then also use that address.
+if [[ "$MASTER" == spark://127.0.0.1:* || "$MASTER" == spark://localhost:* ]]; then export SPARK_LOCAL_IP=127.0.0.1; fi
 
 # Spark itself is not in the Wayang distribution. Use the exact Spark version Wayang was built
 # against (3.5.x, from the local Maven cache), found once with Maven and saved in build/.
@@ -467,7 +487,7 @@ PY
 else
   : >"$DONE_IDS"
 fi
-DONE=0; FAILED=0; RESUMED=0
+DONE=0; FAILED=0; RESUMED=0; RETRY=0
 for entry in "${CONFIGS[@]}"; do
   IFS='|' read -r res op src n rr k s w <<<"$entry"
   DONE=$((DONE + 1))
@@ -489,19 +509,25 @@ for entry in "${CONFIGS[@]}"; do
   say "[$DONE/$TOTAL] $id   (eta $eta)"
 
   flags=$(resource_flags "$res") || exit 2
+  if is_cluster "$res"; then
+    IFS=: read -r _ _ shape <<<"$res"
+    core_args=(--master "$MASTER" --executors "${shape%x*}" --executor-cores "${shape#*x}" --executor-memory "$EXEC_MEM")
+  else
+    core_args=(--cores "$(resource_cores "$res")")
+  fi
   right=$n; (( rr > 0 )) && right=$rr
   if [[ "$src" == "text" ]]; then
     ensure_input "$n" "$k" "$w" 42
     [[ "$op" == "join" || "$op" == "union" || "$op" == "cartesian" ]] && ensure_input "$right" "$k" "$w" 43
   fi
   # shellcheck disable=SC2086
-  with_timeout "$TIMEOUT_S" "$JAVA" $flags $OPENS $JAVA_EXTRA \
+  with_timeout "$TIMEOUT_S" $JAVA_PREFIX "$JAVA" $flags $OPENS $JAVA_EXTRA \
     -Dlog4j.configurationFile="file://$HERE/log4j2-quiet.xml" \
     -Dspark.local.dir="$OUT_DIR/tmp/spark" \
     -Dwayangprof.cpu="$CPU_MODEL" -Dwayangprof.host="$HOST_LABEL" \
     -cp "$CP" wayangprof.SparkOperatorProfiler \
     --op "$op" --source "$src" --rows "$n" --right-rows "$right" --keys "$k" --sel "$s" --words "$w" \
-    --cores "$(resource_cores "$res")" --warmup "$WARMUP" --reps "$REPS" \
+    "${core_args[@]}" --warmup "$WARMUP" --reps "$REPS" \
     --data-dir "$DATA_DIR" --out "$RAW" --tmp-dir "$OUT_DIR/tmp" \
     ${PIDRUSAGE:+--pidrusage "$PIDRUSAGE"} ${COLD_ARGS[@]+"${COLD_ARGS[@]}"} \
     --resource "$label" --tag "$TAG" ${PROFILER_ARGS:-} \
@@ -511,7 +537,11 @@ for entry in "${CONFIGS[@]}"; do
   if (( EPHEMERAL )); then
     rm -f "$DATA_DIR/rows-${n}_keys-${k}_words-${w}_seed-42.csv" "$DATA_DIR/rows-${right}_keys-${k}_words-${w}_seed-43.csv"
   fi
-  if (( rc != 0 )); then
+  if (( rc == 75 )); then  # the cluster did not give the asked executors: not the config's fault, try again later
+    RETRY=$((RETRY + 1))
+    say "   NOT RUN (cluster shape not available), will be retried; see $LOG"
+    echo "RETRY $id (cluster shape not available)" >>"$LOG"
+  elif (( rc != 0 )); then
     FAILED=$((FAILED + 1))
     why="exit $rc"; (( rc == 124 )) && why="timeout after ${TIMEOUT_S}s"
     grep -q "OutOfMemoryError" <(tail -50 "$LOG") && why="out of memory"
@@ -520,7 +550,7 @@ for entry in "${CONFIGS[@]}"; do
   fi
 done
 
-say "finished in $(( ($(date +%s) - START) / 60 )) min: $((DONE - RESUMED - FAILED)) ok, $FAILED failed, $RESUMED already done"
+say "finished in $(( ($(date +%s) - START) / 60 )) min: $((DONE - RESUMED - FAILED - RETRY)) ok, $FAILED failed, $RETRY to retry, $RESUMED already done"
 rm -rf "$OUT_DIR/tmp"
 
 # ---------------------------------------------------------------------------------------------

@@ -51,11 +51,11 @@ Stopping and restarting continues where it left off.
 | Group | Columns | Source |
 |---|---|---|
 | Time | `wall_exec_ns`, `wall_total_ns` | `System.nanoTime` |
-| CPU | `thread_cpu_exec_ns`, `thread_user_exec_ns`, `process_cpu_ns`, `os_user_ns`, `os_system_ns`, `os_user_pcore_ns`, `os_runnable_ns`, `os_cpu_qos_*` | ThreadMXBean, OS |
+| CPU | `thread_cpu_exec_ns`, `thread_user_exec_ns`, `process_cpu_exec_ns` (all JVM threads: operator + the GC/JIT work it causes), `process_cpu_ns`, `os_user_ns`, `os_system_ns`, `os_user_pcore_ns`, `os_runnable_ns`, `os_cpu_qos_*` | ThreadMXBean, OS |
 | Hardware | `os_instructions`, `os_cycles`, `os_*_pcore` | OS (Apple Silicon counters) |
 | Energy | `os_energy_nj`, `os_energy_pcore_nj` | OS (macOS); Linux: `os_energy_pkg_nj` from RAPL, whole CPU package |
 | Memory | `thread_alloc_exec_bytes`, `total_alloc_bytes`, `live_heap_after_gc_max_bytes`, `heap_peak_bytes`, `pool_eden/survivor/old_peak_bytes`, `os_phys_footprint_bytes_delta`, `os_resident_bytes_delta` | MXBeans, OS |
-| GC / JIT | `gc_count`, `gc_time_ms`, `gc_young_*`, `gc_old_*`, `gc_max_pause_ms`, `jit_compile_ms`, `classes_loaded` | MXBeans |
+| GC / JIT | `gc_count`, `gc_time_ms`, `gc_young_*`, `gc_old_*`, `gc_max_pause_ms`, `jit_compile_ms`, `classes_loaded`; exec part only: `gc_time_exec_ms`, `jit_compile_exec_ms` | MXBeans |
 | Disk | `os_disk_read_bytes`, `os_disk_write_bytes`, `os_logical_write_bytes`, `os_pageins`, `out_bytes` | OS |
 | OS activity | `os_page_faults`, `os_cow_faults`, `os_context_switches`, `os_syscalls_unix`, `os_syscalls_mach`, `os_threads_*` | OS |
 | Network | `network_bytes` | always 0: the Java platform runs inside one JVM |
@@ -65,6 +65,19 @@ GC columns have the same names for every garbage collector: `gc_young_*` (G1 you
 `*_exec_*` columns start at the first record, so they leave out Wayang's plan optimization; `*_total_*`
 cover the whole `execute()` call. `thread_*` columns count only the thread that runs the operator.
 `os_*` columns count the whole JVM process, including JIT and GC threads, so they are noisier.
+
+**What each column's time window covers.** Only the `*_exec_*` columns (plus `thread_*`) are limited to running
+the plan. `wall_total_ns`, `process_cpu_ns`, `jit_compile_ms`, `gc_*` and all `os_*` columns cover the whole
+`execute()` call, which includes Wayang's optimizer. The optimizer takes longer for the operator plan than for
+the baseline (one more operator to plan), so in `pairs.csv` these columns carry some optimizer cost: on the
+laptop data a median of 0.8 ms (Java) / 3.4 ms (Spark) per pair, about 17% of the operator's own `wall_exec_ns`.
+Use the exec columns as cost-model targets; use the whole-run columns only for things the optimizer does not
+touch (disk bytes) or as context.
+
+**Warm-up.** After the `--warmup` pairs, small configs get extra unmeasured runs until each plan has read
+3M input rows (`--min-warmup-rows`; at most 20 extra runs or 10 s). With only 2 warm-up pairs a 10k-row config
+would be measured while its per-row code is still being JIT-compiled. `warmup_runs` stores the total, and
+`jit_compile_exec_ms` shows JIT activity that is left during the measured part.
 
 ## Wayang's own estimates
 

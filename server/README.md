@@ -13,6 +13,7 @@ Spark single-node, alternating, with Wayang's estimate stored next to every meas
 | `next_chunk.py` | the next unfinished configs of a list (used by `run-server.sh`) |
 | `validate_data.py` | checks the data for impossible or suspicious values (runs automatically) |
 | `run-server.slurm` | the same as a SLURM batch job, if the server uses SLURM |
+| `run-cluster.sh` | **on the server, after run-server.sh**: Spark standalone clusters of 1-10 executors, one at a time (see [below](#spark-clusters-run-clustersh)) |
 
 ## Steps
 
@@ -102,6 +103,56 @@ per platform = 50,000–75,000 rows in `pairs.csv` each**.
   cycles and instructions do not (CPU time is what the model uses). Energy only if RAPL is readable (rare
   in VMs): `sudo chmod a+r /sys/class/powercap/intel-rapl:0/energy_uj`.
 
+## Spark clusters (`run-cluster.sh`)
+
+The third phase of [`../plan.md`](../plan.md): Spark with several executors, so shuffles cross from one executor
+to another and the data includes network cost. On one big VM (e.g. 64 cores) it starts **standalone Spark clusters
+of 1 to 10 executors**, one cluster at a time:
+
+```bash
+./run-cluster.sh --check                                  # ~1 min: a 2-executor cluster, one config, self-test
+nohup ./run-cluster.sh --hours 72 >/dev/null 2>&1 &       # the real run; restart continues
+tail -f ../results-cluster/cluster.log
+```
+
+**Run it after `run-server.sh` has finished, never at the same time**: both scripts refuse to start while the other
+runs, because two runs on one machine distort each other's timings.
+
+How a cluster is built (64 cores, defaults):
+
+```
+cores 0-3    master + driver (the profiler JVM, 8 GB heap)          <- --reserve 4, --driver-heap
+cores 4-9    worker 1 -> executor 1 (6 task threads, own JVM)        \
+cores 10-15  worker 2 -> executor 2                                   } N workers for shape Nx6, N = 1..10
+...                                                                   } each pinned with taskset, heap = --executor-memory-gb
+cores 58-63  worker 10 -> executor 10                                /
+```
+
+- **Shapes** `1x6, 2x6, ..., 10x6` (N executors x 6 cores = 6 to 60 task threads). Other shapes with `--shapes`, e.g.
+  the same 24 cores split differently, to separate "more parallelism" from "more network":
+  `--shapes "1x24 2x12 3x8 4x6 6x4 8x3 12x2"`.
+- **Same configs on every shape**: `sweep.py --platform spark-cluster` draws each data config once and lists it for
+  every shape, so each shape is measured on the same inputs. Shapes take turns in chunks of 20 configs (start
+  rotates every round), so a run that stops early still covers all shapes evenly.
+- **Executor memory** is the same for every shape (by default as much as the 10-executor shape fits into 75% of
+  RAM, at most 8 GB). Restarting with other shapes, heap or memory is refused (the rows would not be comparable).
+- **Everything on 127.0.0.1**: master, workers, executors and driver, so nothing is reachable from outside the VM.
+- **Network**: `spark.shuffle.readHostLocalDisk=false`, so shuffle blocks of other executors are fetched over TCP
+  and counted in `network_bytes` (with Spark's default they would be read from disk and counted as local). This is
+  loopback TCP: serialization, Netty and kernel copies are real, a physical network's bandwidth limit and
+  latency are not. Real multi-node runs are plan.md's phase 3b.
+- **Checks per config**: the profiler waits until exactly N executors with N x C cores are registered; otherwise
+  the config is marked `RETRY` and runs again later, never recorded with the wrong shape.
+- **Hyperthreads**: on a VM with 2 threads per core, cores 33-64 are hyperthreads of cores 1-32, so shapes above
+  ~5 executors share physical cores. The machine report in `cluster.log` says so; it is a property of the machine.
+
+Output in `../results-cluster/spark-cluster/` (same files as the other runs) plus `cluster.list`, `lists/<shape>.list`,
+`logs/` (master and worker logs) and `validation.txt`. Train with it like the Spark data; add `executors` and
+`executor_cores` as model features (the current features know only `task_slots`).
+
+Stop: `pkill -f run-cluster.sh; pkill -f OperatorProfiler` (stops the cluster too). Each config takes ~10-20 s
+(a fresh driver and executors per config), so 72 hours give roughly 1,300-2,500 configs per shape.
+
 ## Changes in the profilers for this run
 
 - 8 Nov 2026:
@@ -116,3 +167,10 @@ per platform = 50,000–75,000 rows in `pairs.csv` each**.
   - `burn` / `sleep` test operators in both profilers.
   - `timeout` fallback; CPU model on ARM; small-RAM guard in `sweep.py`.
   - Bundled JDK; `--check` self-test and validation.
+- 12 Nov 2026:
+  - Spark cluster mode (`--master`, `HEAP:GC:NxC` resources) and `run-cluster.sh`; `sweep.py --platform spark-cluster`.
+  - New columns: `process_cpu_exec_ns` (Java), `jit_compile_exec_ms`, `gc_time_exec_ms`, `warmup_runs`, `wall_first_task_ns`,
+    `executors_used`, `executors_process_cpu_ns`, `executor_cores`, `executor_memory_bytes`, `shuffle_host_local_disk`.
+  - Extra warm-up for small configs (until 3M input rows per plan, at most 20 runs / 10 s).
+  - `next_chunk.py` prints nothing when a list is finished (before, both runners kept looping until the time limit).
+  - `validate_data.py`: cluster network and executor checks, JIT-during-measurement warning.

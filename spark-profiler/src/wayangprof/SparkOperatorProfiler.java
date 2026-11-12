@@ -269,13 +269,13 @@ public final class SparkOperatorProfiler {
      */
     static final class Tap {
         static final AtomicBoolean fired = new AtomicBoolean();
-        static volatile long wallNs, processCpuNs, totalAllocBytes;
+        static volatile long wallNs, processCpuNs, totalAllocBytes, jitMs, gcMs;
         // Sums over the jobs of one measured run (the union baseline runs two jobs).
-        static long sumWall, sumCpu, sumAlloc;
+        static long sumWall, sumCpu, sumAlloc, sumJit, sumGc;
         static boolean allFired;
 
         static void resetRun() {
-            sumWall = sumCpu = sumAlloc = 0;
+            sumWall = sumCpu = sumAlloc = sumJit = sumGc = 0;
             allFired = true;
         }
 
@@ -288,6 +288,8 @@ public final class SparkOperatorProfiler {
             wallNs = System.nanoTime();
             processCpuNs = OSMX.getProcessCpuTime();
             totalAllocBytes = TMX.getTotalThreadAllocatedBytes();
+            jitMs = jitTotalMs();
+            gcMs = gcTotalMs();
         }
 
         /** Called on the driver right after one job ends. */
@@ -299,7 +301,23 @@ public final class SparkOperatorProfiler {
             sumWall += System.nanoTime() - wallNs;
             sumCpu += OSMX.getProcessCpuTime() - processCpuNs;
             sumAlloc += TMX.getTotalThreadAllocatedBytes() - totalAllocBytes;
+            sumJit += jitTotalMs() - jitMs;
+            sumGc += gcTotalMs() - gcMs;
         }
+    }
+
+    static final List<GarbageCollectorMXBean> GCS = ManagementFactory.getGarbageCollectorMXBeans();
+
+    /** JIT compile time of this JVM so far (all compiler threads), ms. */
+    static long jitTotalMs() {
+        return JIT != null && JIT.isCompilationTimeMonitoringSupported() ? JIT.getTotalCompilationTime() : 0;
+    }
+
+    /** GC time of this JVM so far (all collectors), ms. */
+    static long gcTotalMs() {
+        long t = 0;
+        for (GarbageCollectorMXBean gc : GCS) t += Math.max(0, gc.getCollectionTime());
+        return t;
     }
 
     /** Output records counted by the sink (or by the text sink's formatter). */
@@ -421,9 +439,15 @@ public final class SparkOperatorProfiler {
      */
     static final class SparkStats extends SparkListener {
         private final Map<String, Long> m = new TreeMap<>();
+        /** Launch time (driver clock, epoch ms) of every task of the run, to find each job's first task. */
+        private final List<Long> launchTimes = new ArrayList<>();
+        /** Executors that ran at least one task of the run. */
+        private final Set<String> executorsUsed = new HashSet<>();
 
         synchronized void reset() {
             this.m.clear();
+            this.launchTimes.clear();
+            this.executorsUsed.clear();
             for (String k : List.of("spark_jobs", "spark_stages", "spark_tasks", "spark_stage_tasks_max",
                     "task_run_ms", "task_run_ms_max", "task_cpu_ns", "task_deserialize_ms", "task_deserialize_cpu_ns",
                     "task_gc_ms", "task_result_bytes", "task_result_serialize_ms", "task_peak_execution_memory_bytes",
@@ -462,6 +486,10 @@ public final class SparkOperatorProfiler {
         @Override
         public synchronized void onTaskEnd(SparkListenerTaskEnd e) {
             this.add("spark_tasks", 1);
+            if (e.taskInfo() != null) {
+                this.launchTimes.add(e.taskInfo().launchTime());
+                this.executorsUsed.add(e.taskInfo().executorId());
+            }
             TaskMetrics t = e.taskMetrics();
             if (t == null) return;
             this.add("task_run_ms", t.executorRunTime());
@@ -488,6 +516,17 @@ public final class SparkOperatorProfiler {
             this.add("shuffle_read_remote_to_disk_bytes", t.shuffleReadMetrics().remoteBytesReadToDisk());
             this.add("shuffle_read_records", t.shuffleReadMetrics().recordsRead());
             this.add("shuffle_fetch_wait_ms", t.shuffleReadMetrics().fetchWaitTime());
+        }
+
+        /** Earliest task launch in [fromMs, toMs] (epoch ms), or -1 if no task was launched then. */
+        synchronized long firstLaunchBetween(long fromMs, long toMs) {
+            long first = Long.MAX_VALUE;
+            for (long t : this.launchTimes) if (t >= fromMs && t <= toMs && t < first) first = t;
+            return first == Long.MAX_VALUE ? -1 : first;
+        }
+
+        synchronized int executorsUsed() {
+            return this.executorsUsed.size();
         }
 
         /** Waits until Spark has delivered every listener event of the finished jobs; false on timeout. */
@@ -710,16 +749,31 @@ public final class SparkOperatorProfiler {
         String tag = "";
         boolean estimateOnly = false;    // only write Wayang's estimates for both plans to --out, run nothing
         long work = 1000;                // test operators: burn = loop iterations per row, sleep = microseconds per row
+        // Standalone cluster (null = local mode): executors x executor cores, one executor per worker.
+        String clusterMaster = null;     // spark://host:port
+        int executors = 0;
+        int executorCores = 0;
+        String executorMemory = "4g";
+        // Extra warm-up runs (no measurements) until each plan has read this many input rows, so small
+        // configs are measured with JIT-compiled code too. At most maxExtraWarmup runs or 10 s.
+        long minWarmupRows = 3_000_000;
+        int maxExtraWarmup = 20;
 
         boolean binary() {
             return BINARY.contains(this.op);
         }
 
+        boolean cluster() {
+            return this.clusterMaster != null;
+        }
+
         int coreCount() {
+            if (this.cluster()) return this.executors * this.executorCores;
             return this.cores.equals("all") ? Runtime.getRuntime().availableProcessors() : Integer.parseInt(this.cores);
         }
 
         String master() {
+            if (this.cluster()) return this.clusterMaster;
             return this.cores.equals("all") ? "local[*]" : "local[" + this.cores + "]";
         }
 
@@ -755,6 +809,12 @@ public final class SparkOperatorProfiler {
                 case "--tag": c.tag = v; i++; break;
                 case "--estimate-only": c.estimateOnly = true; break;
                 case "--work": c.work = Long.parseLong(v); i++; break;
+                case "--master": c.clusterMaster = v; i++; break;
+                case "--executors": c.executors = Integer.parseInt(v); i++; break;
+                case "--executor-cores": c.executorCores = Integer.parseInt(v); i++; break;
+                case "--executor-memory": c.executorMemory = v; i++; break;
+                case "--min-warmup-rows": c.minWarmupRows = Long.parseLong(v); i++; break;
+                case "--max-extra-warmup": c.maxExtraWarmup = Integer.parseInt(v); i++; break;
                 case "-h": case "--help": usage(); System.exit(0); break;
                 default: System.err.println("Unknown argument: " + a); usage(); System.exit(2);
             }
@@ -772,6 +832,10 @@ public final class SparkOperatorProfiler {
             System.err.println("--cores must be a positive number or all");
             System.exit(2);
         }
+        if (c.cluster() && (!c.clusterMaster.startsWith("spark://") || c.executors < 1 || c.executorCores < 1)) {
+            System.err.println("--master needs spark://host:port, --executors N and --executor-cores C");
+            System.exit(2);
+        }
         if (c.rightRows < 0) c.rightRows = c.rows;
         c.keys = Math.max(1, c.keys);
         return c;
@@ -781,7 +845,9 @@ public final class SparkOperatorProfiler {
         System.err.println("Usage: SparkOperatorProfiler --op <op> [--source text|collection] [--rows N] [--right-rows N]\n"
                 + "         [--keys K] [--sel S] [--words W] [--warmup N] [--reps N] [--cores N|all] [--data-dir D]\n"
                 + "         [--out raw.csv] [--tmp-dir D] [--pidrusage path] [--cold-cmd \"sudo -n purge\"]\n"
-                + "         [--resource label] [--tag t]\n"
+                + "         [--resource label] [--tag t] [--min-warmup-rows N] [--max-extra-warmup N]\n"
+                + "         [--master spark://host:port --executors N --executor-cores C --executor-memory 4g]\n"
+                + "                             (standalone cluster instead of local mode)\n"
                 + "         [--estimate-only]   (write only Wayang's estimates for the baseline and operator plan to --out)\n"
                 + "Operators: " + NAMES.keySet());
     }
@@ -1167,6 +1233,7 @@ public final class SparkOperatorProfiler {
         stats.reset();
         Map<String, Long> jvm0 = jvmCounters();
         OsSnap os0 = os.snapshot();
+        long execCpu0 = Executors.cpuNs();
 
         LiveHeap.measuring = true;
         long t0 = System.nanoTime();
@@ -1174,9 +1241,16 @@ public final class SparkOperatorProfiler {
         long pcpu0 = OSMX.getProcessCpuTime();
         long talloc0 = TMX.getTotalThreadAllocatedBytes();
 
-        for (WayangPlan plan : plans) {
+        // Time window of each job on the driver, in both clocks (task launch times are epoch ms).
+        int nJobs = plans.size();
+        long[] jobStartNs = new long[nJobs], jobStartMs = new long[nJobs], jobEndNs = new long[nJobs], jobEndMs = new long[nJobs];
+        for (int j = 0; j < nJobs; j++) {
             Tap.reset();
-            ctx.execute(c.op + (baseline ? "-baseline" : ""), plan);
+            jobStartMs[j] = System.currentTimeMillis();
+            jobStartNs[j] = System.nanoTime();
+            ctx.execute(c.op + (baseline ? "-baseline" : ""), plans.get(j));
+            jobEndNs[j] = System.nanoTime();
+            jobEndMs[j] = System.currentTimeMillis();
             Tap.endJob();
         }
 
@@ -1185,6 +1259,7 @@ public final class SparkOperatorProfiler {
         long pcpu1 = OSMX.getProcessCpuTime();
         long talloc1 = TMX.getTotalThreadAllocatedBytes();
         Map<String, Long> peaks = poolPeaks();
+        long execCpu1 = Executors.cpuNs();
         boolean drained = SparkStats.drain(jsc);
         Map<String, Long> spark = stats.snapshot();
         sleep(50); // let late GC notifications arrive
@@ -1192,17 +1267,40 @@ public final class SparkOperatorProfiler {
         OsSnap os1 = os.snapshot();
         Map<String, Long> jvm1 = jvmCounters();
 
+        // Wall time from the first task launch of each job to the job's end (ms resolution at the start).
+        // Leaves out Wayang's optimization and Spark's job submission like wall_exec_ns does, but needs no
+        // code in the tasks, so it also works when the tasks run in other JVMs (cluster mode).
+        Long firstTaskWall = 0L;
+        for (int j = 0; j < nJobs && firstTaskWall != null; j++) {
+            long first = stats.firstLaunchBetween(jobStartMs[j], jobEndMs[j]);
+            if (first < 0) firstTaskWall = null;
+            else firstTaskWall += jobEndNs[j] - (jobStartNs[j] + (first - jobStartMs[j]) * 1_000_000L);
+        }
+
         boolean tapped = Tap.allFired;
-        m.put("out_rows", OUT_ROWS.get());
+        long outRows = OUT_ROWS.get();
+        // In cluster mode the text sink's formatter runs in the executors, where OUT_ROWS is another JVM's counter.
+        if (c.cluster() && !baseline && c.op.equals("textsink")) outRows = spark.getOrDefault("output_records", 0L);
+        m.put("out_rows", outRows);
         m.put("out_bytes", Files.exists(sinkDir) ? sizeOf(sinkDir) : 0L);
         m.put("spark_listener_drained", drained ? 1 : 0);  // 0 = Spark's task metrics of this run may be incomplete
-        // Time and CPU. "total" = whole execute() call; "exec" = from the first record to the end.
+        m.put("executors_used", stats.executorsUsed());
+        // Time and CPU. "total" = whole execute() call; "exec" = from the first record to the end
+        // (cluster mode: from the first task launch, see wall_first_task_ns).
         m.put("wall_total_ns", t1 - t0);
         m.put("jobs", plans.size());
-        m.put("wall_exec_ns", tapped ? Tap.sumWall : null);
+        m.put("wall_exec_ns", c.cluster() ? firstTaskWall : (tapped ? Tap.sumWall : null));
+        m.put("wall_first_task_ns", firstTaskWall);
         m.put("process_cpu_ns", pcpu1 - pcpu0);
         m.put("process_cpu_exec_ns", tapped ? Tap.sumCpu : null);
         m.put("driver_thread_cpu_ns", cpu1 - cpu0);
+        // CPU of all executor JVMs (cluster mode; ProcessHandle, 10 ms ticks on Linux), whole run. They are idle
+        // while Wayang optimizes, so this is close to their exec-time CPU, GC and shuffle threads included.
+        m.put("executors_process_cpu_ns", execCpu0 >= 0 && execCpu1 >= 0 ? execCpu1 - execCpu0 : null);
+        // JIT and GC between the first record and the end (local mode). JIT here means the operator's code was
+        // not fully compiled yet; analyze/validate flag such runs.
+        m.put("jit_compile_exec_ms", tapped ? Tap.sumJit : null);
+        m.put("gc_time_exec_ms", tapped ? Tap.sumGc : null);
         // Memory
         m.put("total_alloc_bytes", talloc1 - talloc0);
         m.put("total_alloc_exec_bytes", tapped ? Tap.sumAlloc : null);
@@ -1225,11 +1323,112 @@ public final class SparkOperatorProfiler {
             m.put("os_" + k + "_after", v);
             m.put("os_" + k + "_delta", before == null ? null : v - before);
         });
-        // Network: in local mode all shuffle data is read from the local block manager, so this is 0.
-        // On a real cluster most of shuffle_write_bytes would cross the network.
+        // Network: shuffle bytes fetched from another executor. 0 in local mode (one block manager). In cluster
+        // mode spark.shuffle.readHostLocalDisk is off, so blocks of other executors on the same machine are
+        // fetched over TCP and counted here (with it on, Spark reads them from disk and counts them as local).
         m.put("network_bytes", spark.getOrDefault("shuffle_read_remote_bytes", 0L));
         deleteTree(sinkDir);
         return m;
+    }
+
+    /** Runs both plans once without measuring anything: extra JIT warm-up for small configs. */
+    static void warmRun(WayangContext ctx, Cfg c, Inputs in, boolean baseline, Path sinkDir) throws IOException {
+        deleteTree(sinkDir);
+        for (WayangPlan plan : buildPlans(c, in, baseline, sinkDir)) {
+            Tap.reset();
+            ctx.execute(c.op + "-warmup", plan);
+        }
+        deleteTree(sinkDir);
+    }
+
+    /**
+     * Executor JVMs of this application (cluster mode), found by their command line. Their CPU time comes from
+     * the OS, so it includes every thread of the executor (tasks, GC, JIT, shuffle transfer).
+     */
+    static final class Executors {
+        static List<ProcessHandle> procs = List.of();
+
+        static int find(String appId) {
+            procs = ProcessHandle.allProcesses()
+                    .filter(p -> p.info().commandLine()
+                            .map(cl -> cl.contains("CoarseGrainedExecutorBackend") && cl.contains(appId)).orElse(false))
+                    .collect(Collectors.toList());
+            return procs.size();
+        }
+
+        /**
+         * Sum of the executors' CPU time, or -1 if not in cluster mode or not readable. Linux: utime + stime from
+         * /proc/PID/stat (10 ms ticks, includes threads that already ended). macOS does not let one process read
+         * another's CPU time, so there it stays empty.
+         */
+        static long cpuNs() {
+            if (procs.isEmpty()) return -1;
+            long sum = 0;
+            for (ProcessHandle p : procs) {
+                long ns = -1;
+                try {
+                    Path stat = Paths.get(OsProbe.PROC_ROOT, Long.toString(p.pid()), "stat");
+                    if (Files.isReadable(stat)) {
+                        String s = new String(Files.readAllBytes(stat), StandardCharsets.UTF_8);
+                        String[] f = s.substring(s.lastIndexOf(')') + 2).trim().split("\\s+");
+                        ns = (Long.parseLong(f[11]) + Long.parseLong(f[12])) * 10_000_000L;
+                    } else {
+                        ns = p.info().totalCpuDuration().map(java.time.Duration::toNanos).orElse(-1L);
+                    }
+                } catch (Exception e) {
+                    ns = -1;
+                }
+                if (ns < 0) return -1;
+                sum += ns;
+            }
+            return sum;
+        }
+    }
+
+    /** Waits until the cluster gives exactly the asked shape; exits with 75 (try again later) if it does not. */
+    static void waitForExecutors(JavaSparkContext jsc, Cfg c) {
+        long deadline = System.currentTimeMillis() + 120_000;
+        int n = 0, slots = 0;
+        int wantSlots = Math.max(2, c.coreCount()); // Spark reports at least 2
+        while (System.currentTimeMillis() < deadline) {
+            n = jsc.sc().statusTracker().getExecutorInfos().length - 1; // minus the driver
+            slots = jsc.sc().defaultParallelism();
+            if (n >= c.executors && slots >= wantSlots) break;
+            sleep(200);
+        }
+        if (n != c.executors || slots != wantSlots) {
+            System.err.printf("[wayangprof] cluster shape mismatch: wanted %d executors x %d cores, got %d executors, %d task slots%n",
+                    c.executors, c.executorCores, n, slots);
+            System.exit(75);
+        }
+        int found = Executors.find(jsc.sc().applicationId());
+        if (found != c.executors) {
+            System.err.printf("[wayangprof] WARNING: found %d executor processes (expected %d); executors_process_cpu_ns stays empty%n",
+                    found, c.executors);
+            Executors.procs = List.of();
+        }
+    }
+
+    /** Classpath entries the executors need besides Spark: the profiler's classes and Wayang's own jars. */
+    static String executorClassPath() {
+        return Arrays.stream(System.getProperty("java.class.path").split(File.pathSeparator))
+                .filter(e -> {
+                    File f = new File(e);
+                    return f.isDirectory() || (f.getName().startsWith("wayang-") && f.getName().endsWith(".jar"));
+                })
+                .map(e -> new File(e).getAbsolutePath())
+                .collect(Collectors.joining(File.pathSeparator));
+    }
+
+    static void setDefault(String key, String value) {
+        if (System.getProperty(key) == null) System.setProperty(key, value);
+    }
+
+    /** Extra warm-up pairs so each plan reads at least minWarmupRows rows during warm-up in total. */
+    static int extraWarmup(Cfg c) {
+        long perRun = c.rows + (c.binary() ? c.rightRows : 0);
+        long need = (c.minWarmupRows + perRun - 1) / Math.max(1, perRun) - c.warmup;
+        return (int) Math.max(0, Math.min(c.maxExtraWarmup, need));
     }
 
     static long sizeOf(Path p) throws IOException {
@@ -1349,9 +1548,21 @@ public final class SparkOperatorProfiler {
         conf.setProperty("spark.master", c.master());
         conf.setProperty("spark.app.name", "wayangprof");
         conf.setProperty("spark.ui.showConsoleProgress", "false");
-        conf.setProperty("wayang.spark.machines", "1");
-        conf.setProperty("wayang.spark.cores-per-machine", Integer.toString(cores));
-        if (System.getProperty("spark.ui.enabled") == null) System.setProperty("spark.ui.enabled", "false");
+        conf.setProperty("wayang.spark.machines", Integer.toString(c.cluster() ? c.executors : 1));
+        conf.setProperty("wayang.spark.cores-per-machine", Integer.toString(c.cluster() ? c.executorCores : cores));
+        setDefault("spark.ui.enabled", "false");
+        if (c.cluster()) {
+            // Standalone cluster: N workers with C cores each, one executor per worker. spark.executor.cores is
+            // deliberately NOT set: Wayang would then use 2 x executor cores shuffle partitions instead of
+            // 2 x all cores (SparkExecutor). Settings Wayang does not pass on are read by Spark from -Dspark.*.
+            conf.setProperty("spark.executor.memory", c.executorMemory);
+            setDefault("spark.cores.max", Integer.toString(cores));
+            setDefault("spark.shuffle.readHostLocalDisk", "false");   // same-machine shuffle goes over TCP
+            setDefault("spark.scheduler.minRegisteredResourcesRatio", "1.0");
+            setDefault("spark.scheduler.maxRegisteredResourcesWaitingTime", "120s");
+            setDefault("spark.executor.extraClassPath", executorClassPath());
+            setDefault("spark.executor.extraJavaOptions", "-XX:ActiveProcessorCount=" + c.executorCores);
+        }
         WayangContext ctx = new WayangContext(conf).withPlugin(Spark.basicPlugin());
         Files.createDirectories(c.tmpDir);
         Path sinkDir = c.tmpDir.resolve("wayangprof-sink-" + ProcessHandle.current().pid());
@@ -1390,9 +1601,12 @@ public final class SparkOperatorProfiler {
         SparkContextReference sparkRef = SparkPlatform.getInstance().getSparkContext(pin);
         sparkRef.noteObtainedReference();
         JavaSparkContext jsc = sparkRef.get();
+        if (c.cluster()) waitForExecutors(jsc, c);
         SparkStats stats = new SparkStats();
         jsc.sc().addSparkListener(stats);
-        int shufflePartitions = 2 * cores;
+        // Wayang's rule (SparkExecutor): 2 x spark.executor.cores if that is set, else 2 x machines x cores-per-machine.
+        int shufflePartitions = jsc.getConf().contains("spark.executor.cores")
+                ? 2 * jsc.getConf().getInt("spark.executor.cores", 1) : 2 * cores;
         int inPartitions, rightPartitions = 0;
         if (c.source.equals("text")) {
             inPartitions = jsc.textFile(in.leftUrl).getNumPartitions();
@@ -1425,8 +1639,13 @@ public final class SparkOperatorProfiler {
         env.put("max_heap_bytes", Runtime.getRuntime().maxMemory());
         env.put("spark_version", jsc.version());
         env.put("spark_master", jsc.master());
-        env.put("deploy_mode", "local-single-node");
-        env.put("executors", 1);
+        env.put("deploy_mode", c.cluster() ? "standalone-cluster" : "local-single-node");
+        env.put("executors", c.cluster() ? c.executors : 1);
+        env.put("executor_cores", c.cluster() ? c.executorCores : cores);
+        env.put("executor_memory_bytes", c.cluster() ? jsc.getConf().getSizeAsBytes("spark.executor.memory")
+                : Runtime.getRuntime().maxMemory());
+        env.put("shuffle_host_local_disk", jsc.getConf().get("spark.shuffle.readHostLocalDisk", "true"));
+        env.put("wall_exec_from", c.cluster() ? "first_task_launch" : "first_record");
         env.put("task_slots", jsc.sc().defaultParallelism());
         env.put("shuffle_partitions", shufflePartitions);
         env.put("in_partitions", inPartitions);
@@ -1444,6 +1663,15 @@ public final class SparkOperatorProfiler {
             measure(ctx, jsc, stats, c, in, true, os, sinkDir);
             measure(ctx, jsc, stats, c, in, false, os, sinkDir);
         }
+        // Small inputs: a few warm-up runs are too few rows for the JIT to compile the per-row code, so the
+        // measured runs would partly run interpreted. Run both plans more often (cheap: no measuring).
+        int extra = 0;
+        long warmStart = System.nanoTime();
+        for (int want = extraWarmup(c); extra < want && System.nanoTime() - warmStart < 10_000_000_000L; extra++) {
+            warmRun(ctx, c, in, true, sinkDir);
+            warmRun(ctx, c, in, false, sinkDir);
+        }
+        env.put("warmup_runs", c.warmup + extra);
 
         List<Map<String, Object>> rows = new ArrayList<>();
         for (int pair = 0; pair < c.reps; pair++) {

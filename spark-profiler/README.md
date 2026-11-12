@@ -58,6 +58,33 @@ Operators: map, filter, flatmap, reduceby, groupby, globalreduce, count, distinc
   there are unzipped when a config needs them; missing files are generated with the same seed, so the
   contents are identical.
 
+## Cluster mode: a standalone Spark cluster
+
+With `--master spark://HOST:PORT --executors N --executor-cores C --executor-memory M` (or a resource
+`HEAP:GC:NxC` in `run-profiling.sh` with `--master`), the profiler runs on a standalone cluster instead of local
+mode: the profiler JVM is the driver, and N executors (separate JVMs) run the tasks. Shuffle data then moves
+between executors over TCP, so `network_bytes` (remote shuffle bytes) is no longer 0.
+[`../server/run-cluster.sh`](../server/README.md#spark-clusters-run-clustersh) starts such clusters (1 to 10
+executors) on one large machine and runs the profiler on each.
+
+What changes in cluster mode:
+
+| | Local mode | Cluster mode |
+|---|---|---|
+| `wall_exec_ns` starts at | first record leaving the source (on a task thread) | first task launch of each job (`wall_first_task_ns`, from Spark's task launch times; ~2 ms earlier, the same in both plans) |
+| shuffle partitions | 2 x cores | 2 x N x C: `spark.executor.cores` is deliberately not set, otherwise Wayang would use 2 x C |
+| `network_bytes` | 0 | remote shuffle bytes. `spark.shuffle.readHostLocalDisk=false`: with Spark's default, blocks of another executor on the same machine are read from disk and counted as *local* bytes, so network would stay 0 |
+| text sink `out_rows` | counted in the formatter | Spark's `output_records` (the formatter runs in the executors) |
+| CPU | `task_cpu_ns`, `process_cpu_exec_ns` | `task_cpu_ns` (executors, from Spark), `executors_process_cpu_ns` (all executor JVMs, Linux `/proc`, whole run); `process_cpu_*`, `jit_*`, `gc_*`, heap and `os_*` columns cover only the driver |
+| checks | | waits until exactly N executors with C cores in total are registered, else exits with code 75 (the runner retries the config later instead of recording it) |
+
+New columns in both modes: `executors`, `executor_cores`, `executor_memory_bytes`, `executors_used` (executors
+that ran a task), `shuffle_host_local_disk`, `wall_exec_from`, `wall_first_task_ns`.
+
+Note that Wayang reads text files with `sc.textFile(path)`, i.e. at least 2 partitions and one per 32 MB. So the
+input stage and narrow operators (map, filter, flatmap, textsink) run only 2-8 tasks whatever the cluster size;
+only shuffle operators use all 2 x N x C partitions. `in_partitions` is recorded so the model can learn this.
+
 ## Run
 
 ```bash
@@ -119,14 +146,27 @@ machine), plus:
 | Shuffle | `shuffle_write_bytes`, `shuffle_write_records`, `shuffle_write_time_ns`, `shuffle_read_local_bytes`, `shuffle_read_records`, `shuffle_fetch_wait_ms` | Spark |
 | Spark work | `spark_jobs`, `spark_stages`, `spark_tasks`, `spark_stage_tasks_max`, `task_result_bytes` | Spark |
 | I/O | `input_bytes`, `input_records`, `output_bytes`, `output_records`, `os_disk_read_bytes`, `os_disk_write_bytes`, `out_bytes` | Spark, OS |
-| GC / JIT | `gc_count`, `gc_time_ms`, `gc_young_*`, `gc_old_*`, `task_gc_ms`, `gc_max_pause_ms`, `jit_compile_ms` | MXBeans, Spark |
+| GC / JIT | `gc_count`, `gc_time_ms`, `gc_young_*`, `gc_old_*`, `task_gc_ms`, `gc_max_pause_ms`, `jit_compile_ms`; exec part only: `gc_time_exec_ms`, `jit_compile_exec_ms` | MXBeans, Spark |
 | OS activity | `os_page_faults`, `os_context_switches`, `os_syscalls_unix`, `os_threads_*` | OS |
-| Network | `network_bytes` = remote shuffle bytes read | always 0 on a single node |
+| Network | `network_bytes` = remote shuffle bytes read | 0 in local mode; in cluster mode shuffle fetched from other executors |
 
 GC columns have the same names for every garbage collector: `gc_young_*` (G1 young, Serial Copy, Parallel Scavenge), `gc_old_*` (G1 old, MarkSweepCompact, PS MarkSweep), `gc_other_*` (e.g. ZGC), and heap pools `pool_eden_peak_bytes`, `pool_survivor_peak_bytes`, `pool_old_peak_bytes`, `pool_other_heap_peak_bytes`. So every row fills every column, whichever GC the resource setting uses.
 
 All `os_*` and `process_*` columns count the whole JVM, which here includes the driver, the executor, and
 the GC and JIT threads.
+
+**What each column's time window covers.** Only the `*_exec_*` columns (plus `thread_*`) are limited to running
+the plan. `wall_total_ns`, `process_cpu_ns`, `jit_compile_ms`, `gc_*` and all `os_*` columns cover the whole
+`execute()` call, which includes Wayang's optimizer. The optimizer takes longer for the operator plan than for
+the baseline (one more operator to plan), so in `pairs.csv` these columns carry some optimizer cost: on the
+laptop data a median of 0.8 ms (Java) / 3.4 ms (Spark) per pair, about 17% of the operator's own `wall_exec_ns`.
+Use the exec columns as cost-model targets; use the whole-run columns only for things the optimizer does not
+touch (disk bytes) or as context.
+
+**Warm-up.** After the `--warmup` pairs, small configs get extra unmeasured runs until each plan has read
+3M input rows (`--min-warmup-rows`; at most 20 extra runs or 10 s). With only 2 warm-up pairs a 10k-row config
+would be measured while its per-row code is still being JIT-compiled. `warmup_runs` stores the total, and
+`jit_compile_exec_ms` shows JIT activity that is left during the measured part.
 
 ## Wayang's own estimates
 

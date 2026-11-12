@@ -36,7 +36,8 @@ def main():
             out.append(line)
             if len(out) >= n:
                 break
-    print("\n".join(out))
+    if out:  # nothing at all when the list is finished: the runners test for an empty file
+        print("\n".join(out))
 
 
 if __name__ == "__main__":

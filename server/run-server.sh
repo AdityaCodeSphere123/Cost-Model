@@ -64,6 +64,13 @@ mkdir -p "$OUT"
 LOG="$OUT/server.log"
 say() { echo "[$(date '+%F %T')] $*" | tee -a "$LOG"; }
 
+# One profiling job per machine: two at once share CPUs and disturb each other's timings.
+others=$(pgrep -f "run-cluster.sh|OperatorProfiler" 2>/dev/null || true)
+if [[ -n "$others" ]]; then
+  say "ERROR: another profiling run is active on this machine (pids: $(echo $others)); stop it first"
+  exit 1
+fi
+
 # ---- machine and tools -------------------------------------------------------------------------
 if [[ -z "$CORES" ]]; then CORES=$(nproc 2>/dev/null || sysctl -n hw.ncpu); fi
 if [[ -z "$MEM_GB" ]]; then

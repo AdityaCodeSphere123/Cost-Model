@@ -32,13 +32,15 @@ ID_COLS = [
     "wayang_cost_model",
     "spark_version", "spark_master", "deploy_mode", "executors", "task_slots", "shuffle_partitions",
     "in_partitions", "right_in_partitions", "serializer",
+    # cluster shape and how the run was measured
+    "executor_cores", "executor_memory_bytes", "shuffle_host_local_disk", "wall_exec_from", "warmup_runs",
 ]
 # Columns that are neither features nor metrics to subtract.
 SKIP_COLS = {"timestamp", "run_id", "plan", "pair", "plan_execution_operators", "spark_listener_drained",
              "wayang_est_breakdown", "wayang_est_time_prob", "jobs"}
 # Taken from the operator run (not subtracted): what the operator produced and the machine state.
 # wayang_est_out_rows_*: rows Wayang expects to reach the sink, to compare with out_rows.
-OPERATOR_SIDE = ["out_rows", "out_bytes", "sys_load_avg_1m", "sys_free_memory_bytes",
+OPERATOR_SIDE = ["out_rows", "out_bytes", "executors_used", "sys_load_avg_1m", "sys_free_memory_bytes",
                  "wayang_est_out_rows_lower", "wayang_est_out_rows_upper"]
 # Main metrics shown in the printed summary: (column, unit divisor, unit label).
 SUMMARY = [

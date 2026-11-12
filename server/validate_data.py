@@ -58,6 +58,19 @@ def check_file(path):
               lambda r: f(r["task_run_ms"]) > f(r["task_slots"]) * f(r["wall_total_ns"]) / 1e6 * 1.05 + 50)
         check("ERROR", "shuffle records read != written", rows,
               lambda r: abs(f(r["shuffle_read_records"]) - f(r["shuffle_write_records"])) > 0)
+        clus = [r for r in rows if r.get("deploy_mode") == "standalone-cluster"]
+        if clus:
+            shuf = [r for r in clus if f(r.get("executors")) >= 2
+                    and f(r.get("shuffle_read_local_bytes")) + f(r.get("shuffle_read_remote_bytes")) > 1e6]
+            check("ERROR", "cluster: >1 MB shuffled between >= 2 executors but network_bytes = 0 (readHostLocalDisk on?)",
+                  shuf, lambda r: not f(r.get("network_bytes")) > 0)
+            check("WARN", "cluster: not every executor ran a task (few input partitions; real Wayang behaviour)",
+                  [r for r in clus if r["plan"] == "operator"],
+                  lambda r: f(r.get("executors_used")) < f(r.get("executors")))
+    if "jit_compile_exec_ms" in rows[0]:
+        jr = [r for r in rows if r.get("jit_compile_exec_ms") not in ("", None) and f(r["wall_exec_ns"]) >= 20e6]
+        check("WARN", "JIT still compiling during the measured part (> 10% of wall_exec_ns, runs >= 20 ms)", jr,
+              lambda r: f(r["jit_compile_exec_ms"]) * 1e6 > 0.1 * f(r["wall_exec_ns"]))
     else:
         check("ERROR", "operator not on one thread (same_thread = 0)", rows, lambda r: r.get("same_thread") == "0")
         check("ERROR", "thread CPU > wall time (one thread)", rows,

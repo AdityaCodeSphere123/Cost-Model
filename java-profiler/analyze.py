@@ -29,7 +29,7 @@ ID_COLS = [
     "machine_memory_bytes", "java_version", "jvm_args", "gc_name", "max_heap_bytes", "os_probe",
     # Wayang settings used to turn its load estimates into time and cost
     "wayang_cpu_mhz", "wayang_cores", "wayang_disk_ms_per_mb", "wayang_network_ms_per_mb", "wayang_cost_per_ms",
-    "wayang_cost_model",
+    "wayang_cost_model", "warmup_runs",
 ]
 # Columns that are neither features nor metrics to subtract.
 SKIP_COLS = {"timestamp", "run_id", "plan", "pair", "plan_execution_operators",

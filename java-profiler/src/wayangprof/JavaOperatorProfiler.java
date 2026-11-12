@@ -247,13 +247,13 @@ public final class JavaOperatorProfiler {
      */
     static final class Tap {
         static boolean fired;
-        static long wallNs, threadCpuNs, threadUserNs, threadAllocBytes, threadId;
+        static long wallNs, threadCpuNs, threadUserNs, threadAllocBytes, threadId, processCpuNs, jitMs, gcMs;
         // Sums over the jobs of one measured run (the union baseline runs two jobs).
-        static long sumWall, sumCpu, sumUser, sumAlloc;
+        static long sumWall, sumCpu, sumUser, sumAlloc, sumProcessCpu, sumJit, sumGc;
         static boolean allFired, allSameThread;
 
         static void resetRun() {
-            sumWall = sumCpu = sumUser = sumAlloc = 0;
+            sumWall = sumCpu = sumUser = sumAlloc = sumProcessCpu = sumJit = sumGc = 0;
             allFired = allSameThread = true;
         }
 
@@ -273,6 +273,9 @@ public final class JavaOperatorProfiler {
             sumCpu += TMX.getCurrentThreadCpuTime() - threadCpuNs;
             sumUser += TMX.getCurrentThreadUserTime() - threadUserNs;
             sumAlloc += TMX.getThreadAllocatedBytes(me) - threadAllocBytes;
+            sumProcessCpu += OSMX.getProcessCpuTime() - processCpuNs;
+            sumJit += jitTotalMs() - jitMs;
+            sumGc += gcTotalMs() - gcMs;
         }
 
         static void fire() {
@@ -283,7 +286,24 @@ public final class JavaOperatorProfiler {
             threadCpuNs = TMX.getCurrentThreadCpuTime();
             threadUserNs = TMX.getCurrentThreadUserTime();
             threadAllocBytes = TMX.getThreadAllocatedBytes(threadId);
+            processCpuNs = OSMX.getProcessCpuTime();
+            jitMs = jitTotalMs();
+            gcMs = gcTotalMs();
         }
+    }
+
+    static final List<GarbageCollectorMXBean> GCS = ManagementFactory.getGarbageCollectorMXBeans();
+
+    /** JIT compile time of this JVM so far (all compiler threads), ms. */
+    static long jitTotalMs() {
+        return JIT != null && JIT.isCompilationTimeMonitoringSupported() ? JIT.getTotalCompilationTime() : 0;
+    }
+
+    /** GC time of this JVM so far (all collectors), ms. */
+    static long gcTotalMs() {
+        long t = 0;
+        for (GarbageCollectorMXBean gc : GCS) t += Math.max(0, gc.getCollectionTime());
+        return t;
     }
 
     /** Output records counted by the sink. */
@@ -547,6 +567,10 @@ public final class JavaOperatorProfiler {
         String tag = "";
         boolean estimateOnly = false;    // only write Wayang's estimates for both plans to --out, run nothing
         long work = 1000;                // test operators: burn = loop iterations per row, sleep = microseconds per row
+        // Extra warm-up runs (no measurements) until each plan has read this many input rows, so small
+        // configs are measured with JIT-compiled code too. At most maxExtraWarmup runs or 10 s.
+        long minWarmupRows = 3_000_000;
+        int maxExtraWarmup = 20;
 
         boolean binary() {
             return BINARY.contains(this.op);
@@ -583,6 +607,8 @@ public final class JavaOperatorProfiler {
                 case "--tag": c.tag = v; i++; break;
                 case "--estimate-only": c.estimateOnly = true; break;
                 case "--work": c.work = Long.parseLong(v); i++; break;
+                case "--min-warmup-rows": c.minWarmupRows = Long.parseLong(v); i++; break;
+                case "--max-extra-warmup": c.maxExtraWarmup = Integer.parseInt(v); i++; break;
                 case "-h": case "--help": usage(); System.exit(0); break;
                 default: System.err.println("Unknown argument: " + a); usage(); System.exit(2);
             }
@@ -605,6 +631,7 @@ public final class JavaOperatorProfiler {
         System.err.println("Usage: JavaOperatorProfiler --op <op> [--source text|collection] [--rows N] [--right-rows N]\n"
                 + "         [--keys K] [--sel S] [--words W] [--warmup N] [--reps N] [--data-dir D] [--out raw.csv]\n"
                 + "         [--tmp-dir D] [--pidrusage path] [--cold-cmd \"sudo -n purge\"] [--resource label] [--tag t]\n"
+                + "         [--min-warmup-rows N] [--max-extra-warmup N]\n"
                 + "         [--estimate-only]   (write only Wayang's estimates for the baseline and operator plan to --out)\n"
                 + "Operators: " + NAMES.keySet());
     }
@@ -1063,6 +1090,12 @@ public final class JavaOperatorProfiler {
         m.put("thread_user_total_ns", user1 - user0);
         m.put("thread_user_exec_ns", sameThread ? Tap.sumUser : null);
         m.put("process_cpu_ns", pcpu1 - pcpu0);
+        // All threads of the JVM from the first record to the end: the operator thread plus the GC and JIT work
+        // it causes (thread_cpu_exec_ns leaves those out).
+        m.put("process_cpu_exec_ns", tapped ? Tap.sumProcessCpu : null);
+        // JIT and GC between the first record and the end. JIT here means the code was not fully compiled yet.
+        m.put("jit_compile_exec_ms", tapped ? Tap.sumJit : null);
+        m.put("gc_time_exec_ms", tapped ? Tap.sumGc : null);
         // Memory
         m.put("thread_alloc_total_bytes", alloc1 - alloc0);
         m.put("thread_alloc_exec_bytes", sameThread ? Tap.sumAlloc : null);
@@ -1263,6 +1296,23 @@ public final class JavaOperatorProfiler {
             measure(ctx, c, in, true, os, sinkFile);
             measure(ctx, c, in, false, os, sinkFile);
         }
+        // Small inputs: a few warm-up runs are too few rows for the JIT to compile the per-row code, so the
+        // measured runs would partly run interpreted. Run both plans more often (cheap: no measuring).
+        long perRun = c.rows + (c.binary() ? c.rightRows : 0);
+        int want = (int) Math.max(0, Math.min(c.maxExtraWarmup, (c.minWarmupRows + perRun - 1) / Math.max(1, perRun) - c.warmup));
+        int extra = 0;
+        long warmStart = System.nanoTime();
+        for (; extra < want && System.nanoTime() - warmStart < 10_000_000_000L; extra++) {
+            for (boolean baseline : new boolean[]{true, false}) {
+                Files.deleteIfExists(sinkFile);
+                for (WayangPlan plan : buildPlans(c, in, baseline, sinkFile)) {
+                    Tap.reset();
+                    ctx.execute(c.op + "-warmup", plan);
+                }
+            }
+        }
+        Files.deleteIfExists(sinkFile);
+        env.put("warmup_runs", c.warmup + extra);
 
         // Held memory of each plan, from one extra untimed run each (see MemProbe).
         long memBase = memProbe(ctx, c, in, true, sinkFile);

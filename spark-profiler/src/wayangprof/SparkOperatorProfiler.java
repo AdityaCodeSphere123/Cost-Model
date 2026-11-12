@@ -490,12 +490,14 @@ public final class SparkOperatorProfiler {
             this.add("shuffle_fetch_wait_ms", t.shuffleReadMetrics().fetchWaitTime());
         }
 
-        /** Waits until Spark has delivered every listener event of the finished jobs. */
-        static void drain(JavaSparkContext jsc) {
+        /** Waits until Spark has delivered every listener event of the finished jobs; false on timeout. */
+        static boolean drain(JavaSparkContext jsc) {
             try {
-                jsc.sc().listenerBus().waitUntilEmpty(10_000);
+                jsc.sc().listenerBus().waitUntilEmpty(60_000);
+                return true;
             } catch (Exception e) {
-                sleep(300);
+                System.err.println("[wayangprof] WARNING: Spark listener events not all delivered: " + e);
+                return false;
             }
         }
     }
@@ -568,7 +570,12 @@ public final class SparkOperatorProfiler {
     static final class OsProbe {
         final String helper; // path to pidrusage (macOS), or null
         final long pid = ProcessHandle.current().pid();
-        final boolean linux = new File("/proc/self/io").canRead();
+        /** Where Linux counters are read (overridable, so the parsing can be tested with sample files). */
+        static final String PROC_ROOT = System.getProperty("wayangprof.procRoot", "/proc");
+        static final String RAPL_PATH = System.getProperty("wayangprof.raplPath", "/sys/class/powercap/intel-rapl:0/energy_uj");
+        /** RAPL's counter wraps around at this value; a negative difference is corrected by adding it. */
+        static volatile long raplRangeNj;
+        final boolean linux = Files.isReadable(Paths.get(PROC_ROOT, "self", "stat"));
 
         OsProbe(String helper) {
             this.helper = (helper != null && new File(helper).canExecute()) ? helper : null;
@@ -607,29 +614,36 @@ public final class SparkOperatorProfiler {
         }
 
         private void readLinux(OsSnap s) {
+            Path proc = Paths.get(PROC_ROOT);
             try {
-                for (String l : Files.readAllLines(Paths.get("/proc/self/io"))) {
-                    String[] kv = l.split(":\\s*");
-                    if (kv.length != 2) continue;
-                    String name;
-                    switch (kv[0]) {
-                        case "read_bytes": name = "disk_read_bytes"; break;
-                        case "write_bytes": name = "disk_write_bytes"; break;
-                        case "rchar": name = "logical_read_bytes"; break;
-                        case "wchar": name = "logical_write_bytes"; break;
-                        case "syscr": name = "syscalls_read"; break;
-                        case "syscw": name = "syscalls_write"; break;
-                        default: name = kv[0]; break;
+                // Disk and syscall counters of this process. Needs task I/O accounting in the kernel, which some
+                // VMs and containers lack: then only these columns stay empty.
+                Path io = proc.resolve("self/io");
+                if (Files.isReadable(io)) {
+                    for (String l : Files.readAllLines(io)) {  // rchar, wchar, syscr, syscw, read_bytes, write_bytes, ...
+                        String[] kv = l.split(":\\s*");
+                        if (kv.length != 2) continue;
+                        String name;
+                        switch (kv[0]) {
+                            case "read_bytes": name = "disk_read_bytes"; break;
+                            case "write_bytes": name = "disk_write_bytes"; break;
+                            case "rchar": name = "logical_read_bytes"; break;
+                            case "wchar": name = "logical_write_bytes"; break;
+                            case "syscr": name = "syscalls_read"; break;
+                            case "syscw": name = "syscalls_write"; break;
+                            default: name = kv[0]; break;
+                        }
+                        s.counters.put(name, Long.parseLong(kv[1].trim()));
                     }
-                    s.counters.put(name, Long.parseLong(kv[1].trim()));
                 }
-                String stat = new String(Files.readAllBytes(Paths.get("/proc/self/stat")), StandardCharsets.UTF_8);
-                String[] f = stat.substring(stat.lastIndexOf(')') + 2).split(" ");
+                // /proc/self/stat after the ")": index 7 minflt, 9 majflt, 11 utime, 12 stime (clock ticks of 10 ms)
+                String stat = new String(Files.readAllBytes(proc.resolve("self/stat")), StandardCharsets.UTF_8);
+                String[] f = stat.substring(stat.lastIndexOf(')') + 2).trim().split("\\s+");
                 s.counters.put("page_faults", Long.parseLong(f[7]));
                 s.counters.put("pageins", Long.parseLong(f[9]));
                 s.counters.put("user_ns", Long.parseLong(f[11]) * 10_000_000L);
                 s.counters.put("system_ns", Long.parseLong(f[12]) * 10_000_000L);
-                for (String l : Files.readAllLines(Paths.get("/proc/self/status"))) {
+                for (String l : Files.readAllLines(proc.resolve("self/status"))) {
                     String[] kv = l.split(":\\s*");
                     if (kv.length != 2) continue;
                     String v = kv[1].trim().split("\\s+")[0];
@@ -644,9 +658,27 @@ public final class SparkOperatorProfiler {
                         default: break;
                     }
                 }
-                Path rapl = Paths.get("/sys/class/powercap/intel-rapl:0/energy_uj");
+                // Whole machine, from the "cpu" line of /proc/stat (clock ticks): time waiting for disk, and steal =
+                // time the hypervisor gave this VM's CPUs to other VMs. Steal > 0 means the run was disturbed.
+                long machineCpus = 0;
+                for (String l : Files.readAllLines(proc.resolve("stat"))) {
+                    if (l.startsWith("cpu ")) {
+                        String[] c = l.trim().split("\\s+");  // cpu user nice system idle iowait irq softirq steal ...
+                        if (c.length > 5) s.counters.put("sys_iowait_ns", Long.parseLong(c[5]) * 10_000_000L);
+                        if (c.length > 8) s.counters.put("sys_steal_ns", Long.parseLong(c[8]) * 10_000_000L);
+                    } else if (l.startsWith("cpu") && l.length() > 3 && Character.isDigit(l.charAt(3))) {
+                        machineCpus++;  // cpu0, cpu1, ...: the whole machine, unlike -XX:ActiveProcessorCount
+                    }
+                }
+                if (machineCpus > 0) s.gauges.put("sys_cpus", machineCpus);
+                // RAPL energy of the whole CPU package (not only this process), if readable.
+                Path rapl = Paths.get(RAPL_PATH);
                 if (Files.isReadable(rapl)) {
                     s.counters.put("energy_pkg_nj", Long.parseLong(Files.readAllLines(rapl).get(0).trim()) * 1000L);
+                    Path range = rapl.resolveSibling("max_energy_range_uj");
+                    if (raplRangeNj == 0 && Files.isReadable(range)) {
+                        raplRangeNj = Long.parseLong(Files.readAllLines(range).get(0).trim()) * 1000L;
+                    }
                 }
             } catch (Exception e) {
                 System.err.println("procfs read failed: " + e);
@@ -1153,7 +1185,7 @@ public final class SparkOperatorProfiler {
         long pcpu1 = OSMX.getProcessCpuTime();
         long talloc1 = TMX.getTotalThreadAllocatedBytes();
         Map<String, Long> peaks = poolPeaks();
-        SparkStats.drain(jsc);
+        boolean drained = SparkStats.drain(jsc);
         Map<String, Long> spark = stats.snapshot();
         sleep(50); // let late GC notifications arrive
         LiveHeap.measuring = false;
@@ -1163,6 +1195,7 @@ public final class SparkOperatorProfiler {
         boolean tapped = Tap.allFired;
         m.put("out_rows", OUT_ROWS.get());
         m.put("out_bytes", Files.exists(sinkDir) ? sizeOf(sinkDir) : 0L);
+        m.put("spark_listener_drained", drained ? 1 : 0);  // 0 = Spark's task metrics of this run may be incomplete
         // Time and CPU. "total" = whole execute() call; "exec" = from the first record to the end.
         m.put("wall_total_ns", t1 - t0);
         m.put("jobs", plans.size());
@@ -1183,7 +1216,9 @@ public final class SparkOperatorProfiler {
         // OS counters
         os1.counters.forEach((k, v) -> {
             Long before = os0.counters.get(k);
-            m.put("os_" + k, before == null ? null : v - before);
+            Long d = before == null ? null : v - before;
+            if (d != null && d < 0 && k.equals("energy_pkg_nj") && OsProbe.raplRangeNj > 0) d += OsProbe.raplRangeNj;
+            m.put("os_" + k, d);
         });
         os1.gauges.forEach((k, v) -> {
             Long before = os0.gauges.get(k);
@@ -1225,18 +1260,28 @@ public final class SparkOperatorProfiler {
         List<String> header;
         boolean writeHeader;
         if (Files.exists(out) && Files.size(out) > 0) {
-            List<String> lines = Files.readAllLines(out, StandardCharsets.UTF_8);
-            header = new ArrayList<>(Arrays.asList(lines.get(0).split(",", -1)));
+            // Read only the header: raw.csv grows to hundreds of MB on long runs.
+            String first;
+            try (BufferedReader br = Files.newBufferedReader(out, StandardCharsets.UTF_8)) {
+                first = br.readLine();
+            }
+            header = new ArrayList<>(Arrays.asList(first.split(",", -1)));
             List<String> missing = new ArrayList<>(rowKeys);
             missing.removeAll(header);
-            if (!missing.isEmpty()) {
+            if (!missing.isEmpty()) {  // rare (e.g. a new GC adds columns): rewrite once with the new columns
                 String pad = ",".repeat(missing.size());
                 header.addAll(missing);
-                List<String> widened = new ArrayList<>(lines.size());
-                widened.add(String.join(",", header));
-                for (int i = 1; i < lines.size(); i++) widened.add(lines.get(i) + pad);
                 Path tmp = out.resolveSibling(out.getFileName() + ".tmp");
-                Files.write(tmp, widened, StandardCharsets.UTF_8);
+                try (BufferedReader br = Files.newBufferedReader(out, StandardCharsets.UTF_8);
+                     BufferedWriter bw = Files.newBufferedWriter(tmp, StandardCharsets.UTF_8)) {
+                    br.readLine();
+                    bw.write(String.join(",", header));
+                    bw.newLine();
+                    for (String line; (line = br.readLine()) != null; ) {
+                        bw.write(line + pad);
+                        bw.newLine();
+                    }
+                }
                 Files.move(tmp, out, java.nio.file.StandardCopyOption.REPLACE_EXISTING);
                 System.err.println("[wayangprof] added columns to " + out.getFileName() + ": " + missing);
             }

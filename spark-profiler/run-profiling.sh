@@ -64,6 +64,10 @@ MAX_OUT_ROWS=20000000   # skip join/cartesian configs that would produce more ou
 DRY_RUN=0
 RESUME=1
 ADD_ESTIMATES=0
+CONFIG_LIST=""
+HOURS=""
+ANALYZE=1
+EPHEMERAL=0
 COLD=0
 TAG=""
 JAVA_EXTRA="${JAVA_EXTRA:-}"
@@ -89,7 +93,12 @@ Options
   --dry-run                      only print the configs
   --add-estimates                measure nothing: add Wayang's estimates (wayang_* columns) to every row
                                  already in raw.csv, then redo the analysis
-Environment: WAYANG_HOME, WAYANG_SRC, JAVA_HOME, SPARK_JARS (classpath of Spark 3.5 jars, optional),
+  --config-list FILE             run the configs in FILE (one per line: HEAP:GC:CPUS|op|source|rows|right_rows|keys|sel|words,
+                                 e.g. from ../server/sweep.py) instead of the built-in grid
+  --hours H                      stop starting new configs after H hours (the running one finishes)
+  --ephemeral-inputs             delete each generated input file after its config (long sweeps: saves disk)
+  --no-analyze                   do not run analyze.py at the end
+Environment: PROFILER_ARGS (extra profiler arguments, e.g. "--work 20000"), WAYANG_HOME, WAYANG_SRC, JAVA_HOME, SPARK_JARS (classpath of Spark 3.5 jars, optional),
              HOST_LABEL (machine label for the host column), JAVA_EXTRA (more JVM flags), PYTHON
 EOF
 }
@@ -111,6 +120,10 @@ while [[ $# -gt 0 ]]; do
     --no-resume) RESUME=0; shift ;;
     --dry-run) DRY_RUN=1; shift ;;
     --add-estimates) ADD_ESTIMATES=1; shift ;;
+    --config-list) CONFIG_LIST="$2"; shift 2 ;;
+    --hours) HOURS="$2"; shift 2 ;;
+    --ephemeral-inputs) EPHEMERAL=1; shift ;;
+    --no-analyze) ANALYZE=0; shift ;;
     -h|--help) usage; exit 0 ;;
     *) echo "Unknown option: $1"; usage; exit 2 ;;
   esac
@@ -230,7 +243,11 @@ fits_heap() { # op rows right_rows words heap_bytes
 
 cpu_model() {
   if [[ "$OS" == "Darwin" ]]; then sysctl -n machdep.cpu.brand_string 2>/dev/null
-  else grep -m1 "model name" /proc/cpuinfo 2>/dev/null | cut -d: -f2 | sed 's/^ *//'; fi
+  else
+    m=$(grep -m1 "model name" /proc/cpuinfo 2>/dev/null | cut -d: -f2 | sed 's/^ *//')
+    [[ -z "$m" ]] && m=$(lscpu 2>/dev/null | grep -m1 "Model name" | cut -d: -f2 | sed 's/^ *//')  # ARM servers
+    echo "$m"
+  fi
 }
 
 cold_cmd() {
@@ -241,6 +258,9 @@ cold_cmd() {
 # Runs a command with a time limit (macOS has no `timeout`).
 with_timeout() {
   local secs="$1"; shift
+  if ! command -v perl >/dev/null && command -v timeout >/dev/null; then  # Linux without perl
+    timeout -k 5 "$secs" "$@"; return $?
+  fi
   perl -e 'my $s = shift; my $pid = fork(); if ($pid == 0) { exec @ARGV or exit 127 }
            local $SIG{ALRM} = sub { kill "TERM", $pid; sleep 2; kill "KILL", $pid; exit 124 };
            alarm $s; waitpid($pid, 0); exit($? >> 8)' "$secs" "$@"
@@ -306,6 +326,14 @@ for res in $RESOURCES; do
   done
 done
 
+if [[ -n "$CONFIG_LIST" ]]; then  # a prepared list replaces the grid
+  [[ -f "$CONFIG_LIST" ]] || { echo "Config list not found: $CONFIG_LIST"; exit 1; }
+  CONFIGS=(); SKIPPED=0
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    [[ -z "$line" || "$line" == \#* ]] && continue
+    CONFIGS+=("$line")
+  done <"$CONFIG_LIST"
+fi
 TOTAL=${#CONFIGS[@]}
 (( TOTAL > 0 )) || { echo "No configs to run (check --ops / --rows)."; exit 1; }
 say "profile=$PROFILE  configs=$TOTAL  skipped(too big)=$SKIPPED  warmup=$WARMUP reps=$REPS"
@@ -426,14 +454,31 @@ fi
 # Run
 # ---------------------------------------------------------------------------------------------
 START=$(date +%s)
+DEADLINE=""
+[[ -n "$HOURS" ]] && DEADLINE=$(( START + $("$PYTHON" -c "print(int(float('$HOURS') * 3600))") ))
+# Finished config ids, read once (scanning raw.csv for every config gets slow when it holds 100k+ rows).
+DONE_IDS="$OUT_DIR/.done_ids"
+if (( RESUME )) && [[ -s "$RAW" ]]; then
+  "$PYTHON" - "$RAW" >"$DONE_IDS" <<'PY'
+import csv, sys
+with open(sys.argv[1], newline="") as f:
+    print("\n".join(sorted({r["config_id"] for r in csv.DictReader(f)})))
+PY
+else
+  : >"$DONE_IDS"
+fi
 DONE=0; FAILED=0; RESUMED=0
 for entry in "${CONFIGS[@]}"; do
   IFS='|' read -r res op src n rr k s w <<<"$entry"
   DONE=$((DONE + 1))
+  if [[ -n "$DEADLINE" ]] && (( $(date +%s) >= DEADLINE )); then
+    say "time limit of ${HOURS} h reached; stopping (rerun to continue)"
+    break
+  fi
   label=$(resource_label "$res")
   id=$(config_id "$label" "$op" "$src" "$n" "$rr" "$k" "$s" "$w")
 
-  if (( RESUME )) && [[ -f "$RAW" ]] && grep -qF ",$id," "$RAW"; then
+  if (( RESUME )) && grep -qxF "$id" "$DONE_IDS"; then
     RESUMED=$((RESUMED + 1))
     continue
   fi
@@ -459,9 +504,13 @@ for entry in "${CONFIGS[@]}"; do
     --cores "$(resource_cores "$res")" --warmup "$WARMUP" --reps "$REPS" \
     --data-dir "$DATA_DIR" --out "$RAW" --tmp-dir "$OUT_DIR/tmp" \
     ${PIDRUSAGE:+--pidrusage "$PIDRUSAGE"} ${COLD_ARGS[@]+"${COLD_ARGS[@]}"} \
-    --resource "$label" --tag "$TAG" \
+    --resource "$label" --tag "$TAG" ${PROFILER_ARGS:-} \
     >>"$LOG" 2>&1
   rc=$?
+  (( rc == 0 )) && echo "$id" >>"$DONE_IDS"
+  if (( EPHEMERAL )); then
+    rm -f "$DATA_DIR/rows-${n}_keys-${k}_words-${w}_seed-42.csv" "$DATA_DIR/rows-${right}_keys-${k}_words-${w}_seed-43.csv"
+  fi
   if (( rc != 0 )); then
     FAILED=$((FAILED + 1))
     why="exit $rc"; (( rc == 124 )) && why="timeout after ${TIMEOUT_S}s"
@@ -477,6 +526,6 @@ rm -rf "$OUT_DIR/tmp"
 # ---------------------------------------------------------------------------------------------
 # Subtract baselines
 # ---------------------------------------------------------------------------------------------
-if [[ -f "$RAW" ]]; then
+if (( ANALYZE )) && [[ -f "$RAW" ]]; then
   "$PYTHON" "$HERE/analyze.py" "$RAW" --out "$OUT_DIR"
 fi

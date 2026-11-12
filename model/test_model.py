@@ -193,7 +193,7 @@ def test_new_platform():
 
         # From scratch with all three platforms.
         out = run("--data", *DATA, flink, "--epochs", "100", "--out", os.path.join(tmp, "all"))
-        assert "platform flink: 63 rows" in out, out
+        assert f"platform flink: {len(frows)} rows" in out, out
 
         # Few-shot, with a non-default model size: Java + Spark model, then add Flink.
         run("--data", *DATA, "--epochs", "200", "--hidden", "32", "--out", os.path.join(tmp, "js"))

@@ -85,17 +85,21 @@ TARGET_COLUMNS = {
     "java": {
         "cpu": ["thread_cpu_exec_ns"],                     # the one thread that runs the operator
         "io": ["os_disk_read_bytes", "os_disk_write_bytes"],
-        "net": ["network_bytes"],
-        "mem": ["live_heap_after_gc_max_bytes"],
+        "net": ["network_bytes"],                          # always 0: one JVM
+        # Held memory from the profiler's memory run; older rows only have the live heap after a GC.
+        "mem": ["mem_held_bytes|live_heap_after_gc_max_bytes"],
         "runtime": ["wall_exec_ns"],
         "energy": ["os_energy_nj"],
     },
     "spark": {
         "cpu": ["task_cpu_ns"],                            # all Spark tasks
-        # Spark's own shuffle + spill accounting (the OS write counter lags because of the page cache)
-        "io": ["shuffle_write_bytes", "spill_disk_bytes", "os_disk_read_bytes"],
-        "net": ["network_bytes"],                          # remote shuffle bytes; 0 on one machine
-        "mem": ["task_peak_execution_memory_bytes"],
+        "io": ["spill_disk_bytes", "os_disk_read_bytes"],  # disk only; shuffle is counted as network demand
+        # Network demand: shuffle bytes (on a cluster ~(1 - 1/executors) of them cross the network) plus the
+        # results sent to the driver. On one machine nothing crosses a network, but the demand is the same.
+        "net": ["shuffle_write_bytes", "task_result_bytes"],
+        # Memory used at the same time: largest per-task peak x task threads (the sum over all tasks
+        # counts tasks that ran one after the other).
+        "mem": ["task_peak_execution_memory_bytes_max*task_slots"],
         "runtime": ["wall_exec_ns"],
         "energy": ["os_energy_nj"],
     },
@@ -110,10 +114,24 @@ TARGET_COLUMNS = {
 }
 
 
+def _column(r, spec):
+    """One column, 'a|b' = a if present else b, or 'a*b' = a times b."""
+    if "|" in spec:
+        for c in spec.split("|"):
+            v = num(r.get(c))
+            if math.isfinite(v):
+                return v
+        return float("nan")
+    if "*" in spec:
+        a, b = spec.split("*")
+        return num(r.get(a)) * num(r.get(b))
+    return num(r.get(spec))
+
+
 def target(r, platform, k):
     """Measured value of output k (sum of its columns), or NaN if none of them is in the row."""
     cols = TARGET_COLUMNS.get(platform, TARGET_COLUMNS["default"])[k]
-    vals = [num(r.get(c)) for c in cols]
+    vals = [_column(r, c) for c in cols]
     vals = [v for v in vals if math.isfinite(v)]
     return sum(vals) / 1e9 if vals else float("nan")
 

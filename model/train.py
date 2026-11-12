@@ -27,7 +27,8 @@ from model import CostModel
 HERE = os.path.dirname(os.path.abspath(__file__))
 DEFAULT_DATA = [os.path.join(HERE, "..", p, "results", f) for p in ("java-profiler", "spark-profiler")
                 for f in ("pairs.csv", "baseline_costs.csv")]  # baseline_costs.csv -> 'scan' rows
-DEFAULT_WEIGHTS = {"cpu": 1.0, "io": 1.0, "net": 0.0, "mem": 0.5, "runtime": 2.0, "energy": 0.5}
+# net: Spark's network demand (shuffle + results); Java's is 0.
+DEFAULT_WEIGHTS = {"cpu": 1.0, "io": 1.0, "net": 1.0, "mem": 0.5, "runtime": 2.0, "energy": 0.5}
 
 
 # ------------------------------------------------------------------------------------------

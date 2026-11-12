@@ -34,7 +34,7 @@ ID_COLS = [
     "in_partitions", "right_in_partitions", "serializer",
 ]
 # Columns that are neither features nor metrics to subtract.
-SKIP_COLS = {"timestamp", "run_id", "plan", "pair", "plan_execution_operators",
+SKIP_COLS = {"timestamp", "run_id", "plan", "pair", "plan_execution_operators", "spark_listener_drained",
              "wayang_est_breakdown", "wayang_est_time_prob", "jobs"}
 # Taken from the operator run (not subtracted): what the operator produced and the machine state.
 # wayang_est_out_rows_*: rows Wayang expects to reach the sink, to compare with out_rows.
@@ -53,6 +53,17 @@ SUMMARY = [
 ]
 # CPU metric used to decide whether the operator's cost is above the noise: CPU time of all Spark tasks.
 SIGNAL_COL = "task_cpu_ns"
+
+
+# A run is disturbed if the hypervisor "stole" more than this share of the machine's CPU time (Linux VMs only).
+MAX_STEAL = 0.02
+
+
+def steal_share(r):
+    steal, wall, cpus = num(r.get("os_sys_steal_ns")), num(r.get("wall_total_ns")), num(r.get("os_sys_cpus_after"))
+    if steal is None or not wall or not cpus:
+        return 0.0
+    return steal / (wall * cpus)
 
 
 def num(v):
@@ -113,11 +124,19 @@ def main():
     pair_rows = []
     by_config = defaultdict(list)       # config_id -> list of (operator row, baseline row, delta dict)
     dropped = 0
+    stolen = 0
+    undrained = 0
     for (run_id, pair), d in pairs.items():
         if "baseline" not in d or "operator" not in d:
             dropped += 1
             continue
         o, b = d["operator"], d["baseline"]
+        if max(steal_share(o), steal_share(b)) > MAX_STEAL:
+            stolen += 1  # a VM's hypervisor took CPU time away during the run: timings are disturbed
+            continue
+        if "0" in (o.get("spark_listener_drained"), b.get("spark_listener_drained")):
+            undrained += 1  # Spark's task metrics of one run were incomplete
+            continue
         delta = {}
         for c in metric_cols:
             x, y = num(o.get(c)), num(b.get(c))
@@ -183,7 +202,9 @@ def main():
     write_csv(os.path.join(out_dir, "operator_costs.csv"), cost_header, cost_rows)
     write_csv(os.path.join(out_dir, "baseline_costs.csv"), id_cols + ["n_runs", "out_rows"] + metric_cols, base_rows)
 
-    print(f"pairs: {len(pair_rows)}  configs: {len(cost_rows)}  unpaired runs dropped: {dropped}")
+    print(f"pairs: {len(pair_rows)}  configs: {len(cost_rows)}  unpaired runs dropped: {dropped}  "
+          f"pairs disturbed by VM steal time dropped: {stolen}  "
+          f"pairs with incomplete Spark metrics dropped: {undrained}")
     print(f"wrote {out_dir}/pairs.csv, operator_costs.csv, baseline_costs.csv")
     if not args.quiet:
         print_summary(cost_rows)

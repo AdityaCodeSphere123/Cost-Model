@@ -105,6 +105,10 @@ public final class JavaOperatorProfiler {
 
     static {
         NAMES.put("map", new String[]{"MapOperator", "JavaMapOperator"});
+        // Test operators for checking the profiler itself (not in the training grid), see --work:
+        // burn = fixed CPU work per row, sleep = idle wait per row (no CPU).
+        NAMES.put("burn", new String[]{"MapOperator", "JavaMapOperator"});
+        NAMES.put("sleep", new String[]{"MapOperator", "JavaMapOperator"});
         NAMES.put("filter", new String[]{"FilterOperator", "JavaFilterOperator"});
         NAMES.put("flatmap", new String[]{"FlatMapOperator", "JavaFlatMapOperator"});
         NAMES.put("reduceby", new String[]{"ReduceByOperator", "JavaReduceByOperator"});
@@ -404,7 +408,12 @@ public final class JavaOperatorProfiler {
     static final class OsProbe {
         final String helper; // path to pidrusage (macOS), or null
         final long pid = ProcessHandle.current().pid();
-        final boolean linux = new File("/proc/self/io").canRead();
+        /** Where Linux counters are read (overridable, so the parsing can be tested with sample files). */
+        static final String PROC_ROOT = System.getProperty("wayangprof.procRoot", "/proc");
+        static final String RAPL_PATH = System.getProperty("wayangprof.raplPath", "/sys/class/powercap/intel-rapl:0/energy_uj");
+        /** RAPL's counter wraps around at this value; a negative difference is corrected by adding it. */
+        static volatile long raplRangeNj;
+        final boolean linux = Files.isReadable(Paths.get(PROC_ROOT, "self", "stat"));
 
         OsProbe(String helper) {
             this.helper = (helper != null && new File(helper).canExecute()) ? helper : null;
@@ -443,31 +452,36 @@ public final class JavaOperatorProfiler {
         }
 
         private void readLinux(OsSnap s) {
+            Path proc = Paths.get(PROC_ROOT);
             try {
-                // rchar, wchar, syscr, syscw, read_bytes, write_bytes, cancelled_write_bytes
-                for (String l : Files.readAllLines(Paths.get("/proc/self/io"))) {
-                    String[] kv = l.split(":\\s*");
-                    if (kv.length != 2) continue;
-                    String name;
-                    switch (kv[0]) {
-                        case "read_bytes": name = "disk_read_bytes"; break;
-                        case "write_bytes": name = "disk_write_bytes"; break;
-                        case "rchar": name = "logical_read_bytes"; break;
-                        case "wchar": name = "logical_write_bytes"; break;
-                        case "syscr": name = "syscalls_read"; break;
-                        case "syscw": name = "syscalls_write"; break;
-                        default: name = kv[0]; break;
+                // Disk and syscall counters of this process. Needs task I/O accounting in the kernel, which some
+                // VMs and containers lack: then only these columns stay empty.
+                Path io = proc.resolve("self/io");
+                if (Files.isReadable(io)) {
+                    for (String l : Files.readAllLines(io)) {  // rchar, wchar, syscr, syscw, read_bytes, write_bytes, ...
+                        String[] kv = l.split(":\\s*");
+                        if (kv.length != 2) continue;
+                        String name;
+                        switch (kv[0]) {
+                            case "read_bytes": name = "disk_read_bytes"; break;
+                            case "write_bytes": name = "disk_write_bytes"; break;
+                            case "rchar": name = "logical_read_bytes"; break;
+                            case "wchar": name = "logical_write_bytes"; break;
+                            case "syscr": name = "syscalls_read"; break;
+                            case "syscw": name = "syscalls_write"; break;
+                            default: name = kv[0]; break;
+                        }
+                        s.counters.put(name, Long.parseLong(kv[1].trim()));
                     }
-                    s.counters.put(name, Long.parseLong(kv[1].trim()));
                 }
-                // /proc/self/stat after the ")" : field 10 minflt, 12 majflt, 14 utime, 15 stime (clock ticks, 100 Hz)
-                String stat = new String(Files.readAllBytes(Paths.get("/proc/self/stat")), StandardCharsets.UTF_8);
-                String[] f = stat.substring(stat.lastIndexOf(')') + 2).split(" ");
+                // /proc/self/stat after the ")": index 7 minflt, 9 majflt, 11 utime, 12 stime (clock ticks of 10 ms)
+                String stat = new String(Files.readAllBytes(proc.resolve("self/stat")), StandardCharsets.UTF_8);
+                String[] f = stat.substring(stat.lastIndexOf(')') + 2).trim().split("\\s+");
                 s.counters.put("page_faults", Long.parseLong(f[7]));
                 s.counters.put("pageins", Long.parseLong(f[9]));
                 s.counters.put("user_ns", Long.parseLong(f[11]) * 10_000_000L);
                 s.counters.put("system_ns", Long.parseLong(f[12]) * 10_000_000L);
-                for (String l : Files.readAllLines(Paths.get("/proc/self/status"))) {
+                for (String l : Files.readAllLines(proc.resolve("self/status"))) {
                     String[] kv = l.split(":\\s*");
                     if (kv.length != 2) continue;
                     String v = kv[1].trim().split("\\s+")[0];
@@ -482,10 +496,27 @@ public final class JavaOperatorProfiler {
                         default: break;
                     }
                 }
-                // RAPL covers the whole CPU package, not only this process.
-                Path rapl = Paths.get("/sys/class/powercap/intel-rapl:0/energy_uj");
+                // Whole machine, from the "cpu" line of /proc/stat (clock ticks): time waiting for disk, and steal =
+                // time the hypervisor gave this VM's CPUs to other VMs. Steal > 0 means the run was disturbed.
+                long machineCpus = 0;
+                for (String l : Files.readAllLines(proc.resolve("stat"))) {
+                    if (l.startsWith("cpu ")) {
+                        String[] c = l.trim().split("\\s+");  // cpu user nice system idle iowait irq softirq steal ...
+                        if (c.length > 5) s.counters.put("sys_iowait_ns", Long.parseLong(c[5]) * 10_000_000L);
+                        if (c.length > 8) s.counters.put("sys_steal_ns", Long.parseLong(c[8]) * 10_000_000L);
+                    } else if (l.startsWith("cpu") && l.length() > 3 && Character.isDigit(l.charAt(3))) {
+                        machineCpus++;  // cpu0, cpu1, ...: the whole machine, unlike -XX:ActiveProcessorCount
+                    }
+                }
+                if (machineCpus > 0) s.gauges.put("sys_cpus", machineCpus);
+                // RAPL energy of the whole CPU package (not only this process), if readable.
+                Path rapl = Paths.get(RAPL_PATH);
                 if (Files.isReadable(rapl)) {
                     s.counters.put("energy_pkg_nj", Long.parseLong(Files.readAllLines(rapl).get(0).trim()) * 1000L);
+                    Path range = rapl.resolveSibling("max_energy_range_uj");
+                    if (raplRangeNj == 0 && Files.isReadable(range)) {
+                        raplRangeNj = Long.parseLong(Files.readAllLines(range).get(0).trim()) * 1000L;
+                    }
                 }
             } catch (Exception e) {
                 System.err.println("procfs read failed: " + e);
@@ -515,6 +546,7 @@ public final class JavaOperatorProfiler {
         String resource = "default";     // label of the JVM resource setting (heap, GC, cores), set by the runner
         String tag = "";
         boolean estimateOnly = false;    // only write Wayang's estimates for both plans to --out, run nothing
+        long work = 1000;                // test operators: burn = loop iterations per row, sleep = microseconds per row
 
         boolean binary() {
             return BINARY.contains(this.op);
@@ -550,6 +582,7 @@ public final class JavaOperatorProfiler {
                 case "--resource": c.resource = v; i++; break;
                 case "--tag": c.tag = v; i++; break;
                 case "--estimate-only": c.estimateOnly = true; break;
+                case "--work": c.work = Long.parseLong(v); i++; break;
                 case "-h": case "--help": usage(); System.exit(0); break;
                 default: System.err.println("Unknown argument: " + a); usage(); System.exit(2);
             }
@@ -608,14 +641,66 @@ public final class JavaOperatorProfiler {
 
     @SuppressWarnings({"unchecked", "rawtypes"})
     static Operator countingSink(DataSetType<?> type) {
-        Consumer<Object> count = x -> outRows++;
+        Consumer<Object> count = x -> {
+            if (MemProbe.armed) MemProbe.take();
+            outRows++;
+        };
         return new LocalCallbackSink(count, type);
+    }
+
+    /**
+     * Memory an operator holds: in an extra, untimed run, the first row that reaches the sink triggers a full
+     * GC and reads the heap still in use. Operators that collect their whole input before emitting (sort,
+     * groupby, distinct, reduceby, the join's table) hold it at that moment; streaming ones (map, filter) hold
+     * ~nothing. Operator run - baseline run = the operator's held memory (mem_held_bytes).
+     */
+    static final class MemProbe {
+        static volatile boolean armed;
+        static volatile long liveBytes = -1;
+
+        static void take() {
+            armed = false;
+            System.gc();
+            System.gc();
+            liveBytes = ManagementFactory.getMemoryMXBean().getHeapMemoryUsage().getUsed();
+        }
+    }
+
+    /** Runs the plan once, untimed, and returns the live heap when its first row reached the sink (-1 if none). */
+    static long memProbe(WayangContext ctx, Cfg c, Inputs in, boolean baseline, Path sinkFile) throws IOException {
+        Files.deleteIfExists(sinkFile);
+        List<WayangPlan> plans = buildPlans(c, in, baseline, sinkFile);
+        quiesce();
+        long max = -1;
+        for (WayangPlan plan : plans) {  // the union baseline has two jobs: keep the larger one
+            MemProbe.liveBytes = -1;
+            MemProbe.armed = true;
+            ctx.execute(c.op + "-memprobe", plan);
+            MemProbe.armed = false;
+            max = Math.max(max, MemProbe.liveBytes);
+        }
+        Files.deleteIfExists(sinkFile);
+        return max;
     }
 
     static Operator unaryOperator(Cfg c, Path sinkFile) {
         switch (c.op) {
             case "map":
                 return new MapOperator<Row, Row>(r -> new Row(r.id, r.key, r.value * 1.0001 + 1.0, r.text), Row.class, Row.class);
+            case "burn": {
+                final long n = c.work;
+                return new MapOperator<Row, Row>(r -> {
+                    burn(n);
+                    return r;
+                }, Row.class, Row.class);
+            }
+            case "sleep": {
+                final long us = c.work;
+                return new MapOperator<Row, Row>(r -> {
+                    java.util.concurrent.locks.LockSupport.parkNanos(us * 1000);
+                    return r;
+                }, Row.class, Row.class);
+            }
             case "filter": {
                 final int threshold = (int) Math.round(c.sel * c.keys); // keys are uniform in [0, keys)
                 return new FilterOperator<Row>(r -> r.key < threshold, Row.class);
@@ -637,12 +722,34 @@ public final class JavaOperatorProfiler {
                 return new SortOperator<Row, Double>(r -> r.value, Row.class, Double.class);
             case "textsink":
                 return new TextFileSink<Row>(sinkFile.toUri().toString(), r -> {
+                    if (MemProbe.armed) MemProbe.take();
                     outRows++;
                     return r.toString();
                 }, Row.class);
             default:
                 throw new IllegalArgumentException(c.op);
         }
+    }
+
+    static volatile long BURN_SINK;
+
+    /** Pure CPU work: n rounds of xorshift, no allocation, no memory traffic. */
+    static void burn(long n) {
+        long x = 88172645463325252L;
+        for (long i = 0; i < n; i++) {
+            x ^= x << 13;
+            x ^= x >>> 7;
+            x ^= x << 17;
+        }
+        BURN_SINK = x;
+    }
+
+    /** CPU nanoseconds of one burn(n), measured on this thread after warm-up: the expected cost per row. */
+    static double burnCalibration(long n) {
+        for (int i = 0; i < 20_000; i++) burn(n);
+        long c0 = TMX.getCurrentThreadCpuTime();
+        for (int i = 0; i < 20_000; i++) burn(n);
+        return (TMX.getCurrentThreadCpuTime() - c0) / 20_000.0;
     }
 
     static Operator binaryOperator(Cfg c) {
@@ -968,7 +1075,9 @@ public final class JavaOperatorProfiler {
         // OS counters
         os1.counters.forEach((k, v) -> {
             Long before = os0.counters.get(k);
-            m.put("os_" + k, before == null ? null : v - before);
+            Long d = before == null ? null : v - before;
+            if (d != null && d < 0 && k.equals("energy_pkg_nj") && OsProbe.raplRangeNj > 0) d += OsProbe.raplRangeNj;
+            m.put("os_" + k, d);
         });
         os1.gauges.forEach((k, v) -> {
             Long before = os0.gauges.get(k);
@@ -1007,20 +1116,30 @@ public final class JavaOperatorProfiler {
         List<String> header;
         boolean writeHeader;
         if (Files.exists(out) && Files.size(out) > 0) {
-            List<String> lines = Files.readAllLines(out, StandardCharsets.UTF_8);
-            header = new ArrayList<>(Arrays.asList(lines.get(0).split(",", -1)));
+            // Read only the header: raw.csv grows to hundreds of MB on long runs.
+            String first;
+            try (BufferedReader br = Files.newBufferedReader(out, StandardCharsets.UTF_8)) {
+                first = br.readLine();
+            }
+            header = new ArrayList<>(Arrays.asList(first.split(",", -1)));
             List<String> missing = new ArrayList<>(rowKeys);
             missing.removeAll(header);
-            if (!missing.isEmpty()) {
+            if (!missing.isEmpty()) {  // rare (e.g. a new GC adds columns): rewrite once with the new columns
                 String pad = ",".repeat(missing.size());
                 header.addAll(missing);
-                List<String> widened = new ArrayList<>(lines.size());
-                widened.add(String.join(",", header));
-                for (int i = 1; i < lines.size(); i++) widened.add(lines.get(i) + pad);
                 Path tmp = out.resolveSibling(out.getFileName() + ".tmp");
-                Files.write(tmp, widened, StandardCharsets.UTF_8);
+                try (BufferedReader br = Files.newBufferedReader(out, StandardCharsets.UTF_8);
+                     BufferedWriter bw = Files.newBufferedWriter(tmp, StandardCharsets.UTF_8)) {
+                    br.readLine();
+                    bw.write(String.join(",", header));
+                    bw.newLine();
+                    for (String line; (line = br.readLine()) != null; ) {
+                        bw.write(line + pad);
+                        bw.newLine();
+                    }
+                }
                 Files.move(tmp, out, java.nio.file.StandardCopyOption.REPLACE_EXISTING);
-                System.err.println("[wayangprof] added columns to " + out + ": " + missing);
+                System.err.println("[wayangprof] added columns to " + out.getFileName() + ": " + missing);
             }
             writeHeader = false;
         } else {
@@ -1133,6 +1252,8 @@ public final class JavaOperatorProfiler {
                 .map(GarbageCollectorMXBean::getName).collect(Collectors.joining("+")));
         env.put("max_heap_bytes", Runtime.getRuntime().maxMemory());
         env.put("os_probe", os.kind());
+        if (c.op.equals("burn")) env.put("burn_calibrated_ns_per_row", burnCalibration(c.work));
+        if (c.op.equals("burn") || c.op.equals("sleep")) env.put("work", c.work);
 
         System.err.printf("[wayangprof] %s  warmup=%d reps=%d  os_probe=%s  measured=%s%n",
                 c.configId(), c.warmup, c.reps, os.kind(), measured);
@@ -1142,6 +1263,10 @@ public final class JavaOperatorProfiler {
             measure(ctx, c, in, true, os, sinkFile);
             measure(ctx, c, in, false, os, sinkFile);
         }
+
+        // Held memory of each plan, from one extra untimed run each (see MemProbe).
+        long memBase = memProbe(ctx, c, in, true, sinkFile);
+        long memOp = memProbe(ctx, c, in, false, sinkFile);
 
         List<Map<String, Object>> rows = new ArrayList<>();
         for (int pair = 0; pair < c.reps; pair++) {
@@ -1174,6 +1299,8 @@ public final class JavaOperatorProfiler {
                 row.put("in_bytes", in.leftBytes);
                 row.put("right_in_bytes", c.binary() ? in.rightBytes : 0);
                 row.putAll(m);
+                long held = baseline ? memBase : memOp;
+                row.put("mem_held_bytes", held >= 0 ? held : null);  // same value in every pair of this plan
                 row.putAll(baseline ? baseInfo.est : opInfo.est); // Wayang's estimate for this plan
                 row.putAll(env);
                 row.putAll(wayangEnv);

@@ -86,6 +86,7 @@ done
 mkdir -p "$B/Cost-Model/server" "$B/Cost-Model/model"
 cp "$HERE"/*.sh "$HERE"/*.py "$HERE"/*.md "$HERE"/*.slurm "$B/Cost-Model/server/" 2>/dev/null || true
 cp "$REPO"/model/*.py "$REPO/model/requirements.txt" "$REPO/model/README.md" "$B/Cost-Model/model/"
+mkdir -p "$B/Cost-Model/common" && cp "$REPO"/common/*.sh "$REPO"/common/*.py "$B/Cost-Model/common/"
 cp "$REPO/README.md" "$REPO/plan.md" "$B/Cost-Model/"
 
 echo "Archive"

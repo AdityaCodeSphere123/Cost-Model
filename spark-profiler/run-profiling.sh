@@ -34,6 +34,8 @@
 set -uo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=../common/measure-gate.sh
+source "$HERE/../common/measure-gate.sh"  # waits for mains power and for other profilers before each config
 ROOT="$(cd "$HERE/../.." && pwd)"
 
 # ---------------------------------------------------------------------------------------------
@@ -417,9 +419,6 @@ if [[ "$OS" == "Darwin" ]]; then
     cc -O2 -o "$HERE/native/pidrusage" "$HERE/native/pidrusage.c" || exit 1
   fi
   PIDRUSAGE="$HERE/native/pidrusage"
-  if pmset -g batt 2>/dev/null | grep -q "Battery Power"; then
-    say "WARNING: running on battery. CPU speed and energy differ from mains power; plug in for consistent data."
-  fi
 fi
 
 COLD_ARGS=()
@@ -507,6 +506,7 @@ for entry in "${CONFIGS[@]}"; do
   ran=$(( DONE - RESUMED - 1 ))
   eta="?"; (( ran > 0 )) && eta="$(( elapsed * (TOTAL - DONE + 1) / ran / 60 ))min"
   say "[$DONE/$TOTAL] $id   (eta $eta)"
+  gate_enter  # mains power, no other profiler measuring (../common/measure-gate.sh)
 
   flags=$(resource_flags "$res") || exit 2
   if is_cluster "$res"; then
@@ -533,6 +533,7 @@ for entry in "${CONFIGS[@]}"; do
     --resource "$label" --tag "$TAG" ${PROFILER_ARGS:-} \
     >>"$LOG" 2>&1
   rc=$?
+  gate_leave
   (( rc == 0 )) && echo "$id" >>"$DONE_IDS"
   if (( EPHEMERAL )); then
     rm -f "$DATA_DIR/rows-${n}_keys-${k}_words-${w}_seed-42.csv" "$DATA_DIR/rows-${right}_keys-${k}_words-${w}_seed-43.csv"

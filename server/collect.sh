@@ -3,7 +3,8 @@
 # Offline (run ./prepare.sh once before, with internet), no root. Start it inside tmux, so it survives logging out:
 #
 #   tmux new -s wayang
-#   ./collect.sh start --until "2026-11-15 08:00"     # or --hours 60; Ctrl+B then D to detach
+#   ./collect.sh start                                 # runs until the data is ready Sunday 2026-11-15 16:00
+#   ./collect.sh start --until "2026-11-15 16:00"     # the same, said explicitly (or --hours 60); Ctrl+B, D to detach
 #   ./collect.sh status                                # any time, from any terminal (also in collect/STATUS.txt)
 #   tail -f ../collect/collect.log                     # everything that happens, with times
 #   ./collect.sh merge                                 # dataset snapshot now (also automatic every 3 h and at the end)
@@ -22,7 +23,12 @@
 #
 # Robust for days: a lane that crashes is restarted (after 1 min; it gives up after 10 failures in a row), a config
 # that hangs is killed after 30 min, a stop or a reboot loses at most the configs that were running, a lane whose
-# list is finished ends by itself, and the run stops starting new configs at the deadline.
+# list is finished ends by itself.
+#
+# The time limit is when the DATA must be ready (--until, default Sunday 2026-11-15 16:00): new configs stop 50 min
+# before it, configs still running 30 min before it are stopped (only those are lost), and the final merge and
+# export finish before it. Everything finished up to then is kept: each config is written to disk as soon as it
+# ends, and the dataset is exported every 3 h along the way.
 #
 # Output (default ../collect/):
 #   collect.log                   THE log: plan, lane starts / ends / failures, status every 10 min, merges
@@ -30,6 +36,9 @@
 #   data/<platform>/              merged dataset: raw.csv, pairs.csv, operator_costs.csv, baseline_costs.csv
 #   data/validation.txt           data checks of the merged dataset
 #   export/wayang-cost-data.tar.gz  data + logs in one file, refreshed with every merge (scp this one)
+#   data/calibration.txt / .csv   lanes vs alone: the same configs measured alone before the lanes started and by
+#                                 their lane under load (same CPUs), see calibration_report.py
+#   calibration/<platform>/       the alone runs
 #   lanes/<lane>/                 per lane: run.log (every config, with times), runner.out, raw.csv, lane.list
 #   plan.txt, plan.json, lists/   the plan and the config lists (kept, so a restart continues the same run)
 set -uo pipefail
@@ -39,6 +48,9 @@ CM="$(cd "$HERE/.." && pwd)"
 CMD="${1:-help}"; [[ $# -gt 0 ]] && shift
 HOURS=""
 UNTIL=""
+DEFAULT_READY_BY="2026-11-15 16:00"   # the dataset must be complete by then (Sunday 4 pm, server clock)
+STOP_NEW_MIN=${STOP_NEW_MIN:-50}                      # no new configs in the last 50 min before it ...
+HARD_STOP_MIN=${HARD_STOP_MIN:-30}                     # ... configs still running 30 min before are stopped; then the final merge
 CPUS=""
 MEM_GB=""
 PLAN=""
@@ -68,8 +80,9 @@ usage() {
   cat <<EOF
 
 Options (start / plan)
-  --until "YYYY-MM-DD HH:MM"   stop starting new configs at this time (server's clock), or
-  --hours H                    ... after H hours (default 60; remembered for restarts)
+  --until "YYYY-MM-DD HH:MM"   the final dataset must be ready by then (server's clock; default $DEFAULT_READY_BY;
+                               remembered for restarts), or
+  --hours H                    ... H hours from now
   --cpus LIST                  CPUs to use, e.g. "0-47" (default: all this process may use). On a shared server,
                                leave some for others: e.g. --cpus 0-55
   --mem-gb N                   memory to use (default: 85% of the memory available now)
@@ -180,7 +193,7 @@ run_lane_once() {  # name platform cpus mem heap port n c dh hours
 lane_loop() {  # the lane's fields (tab-separated line of lanes_tsv)
   local name platform cpus mem heap port n c dh
   IFS=$'\t' read -r name platform cpus mem heap port n c dh <<<"$1"
-  local L="$RUN/lanes/$name" fails=0 rc before after left hours t0
+  local L="$RUN/lanes/$name" fails=0 rc before after left hours t0 batch=0 topped=0
   mkdir -p "$L"
   [[ -s "$L/lane.started" ]] || date +%s >"$L/lane.started"   # first start: for the rate in the status
   while :; do
@@ -195,9 +208,25 @@ lane_loop() {  # the lane's fields (tab-separated line of lanes_tsv)
     after=$(count_lines "$(lane_done_ids "$L")")
     say "lane $name: runner ended (exit $rc) after $(( ($(now) - t0) / 60 )) min: +$((after - before)) configs, $after total"
     if (( rc == 0 && after == before )); then
+      # List done before the deadline: a fresh random batch (new seed) so the lane never sits idle. Configs this lane
+      # already ran are skipped by their id; if a batch brings nothing new, the space is exhausted for this lane.
+      if (( ! TEST && ! topped )) && [[ "$platform" != spark-cluster ]]; then
+        batch=$(( $(ls "$L"/batch-*.list 2>/dev/null | wc -l) + 1 ))
+        local seed=$(( 100000 + batch * 1000 + $(cksum <<<"$name" | cut -d' ' -f1) % 1000 ))
+        if "$PYTHON" "$HERE/sweep.py" --platform "$platform" --cores "$(awk -F, '{print NF}' <<<"$cpus")" \
+             --mem-gb "${mem%.*}" $( [[ "$heap" != - ]] && echo "--max-heap-gb $heap") --count 20000 --seed "$seed" \
+             >"$L/batch-$batch.list" 2>>"$LOG" && [[ -s "$L/batch-$batch.list" ]]; then
+          mv "$L/lane.list" "$L/lane-done-$batch.list"     # finished list kept; the runner reads only the new one
+          cp "$L/batch-$batch.list" "$L/lane.list"
+          say "lane $name: its list is done before the deadline: added a new random batch of $(count_lines "$L/batch-$batch.list") configs (seed $seed)"
+          topped=1
+          continue
+        fi
+      fi
       say "lane $name: nothing left to run in its list: lane finished"
       break
     fi
+    topped=0
     if (( rc != 0 )); then
       fails=$((fails + 1))
       { echo "---- lane $name failure $fails, last lines of runner.out:"; tail -15 "$L/runner.out"; } >>"$LOG"
@@ -208,6 +237,35 @@ lane_loop() {  # the lane's fields (tab-separated line of lanes_tsv)
     fi
   done
   echo "finished $(date '+%F %T')" >"$L/lane.finished"
+}
+
+# ---- calibration: what running the lanes side by side costs ------------------------------------------
+# Before the lanes start, the first configs of the first java and spark lane are measured ALONE (nothing else running)
+# on that lane's CPUs. The lane then measures the same configs first, on the same CPUs, with all lanes busy. merge_all
+# compares the two (calibration_report.py -> data/calibration.txt / .csv): the effect of sharing caches, memory
+# bandwidth, disk and power with the other lanes, to report next to results from this data. Once per collection.
+CALIB_N=${CALIB_N:-24}   # java configs; spark gets half
+calibrate_alone() {
+  local C="$RUN/calibration" p line name platform cpus rest k pin
+  for p in java spark; do
+    line=$(lanes_tsv | awk -F'\t' -v p="$p" '$2 == p' | head -1)
+    [[ -n "$line" ]] || continue
+    IFS=$'\t' read -r name platform cpus rest <<<"$line"
+    mkdir -p "$C/$p"
+    if [[ ! -s "$C/$p/lane.list" ]]; then
+      k=$CALIB_N; [[ $p == spark ]] && k=$(( (k + 1) / 2 )); (( TEST )) && k=1
+      head -n "$k" "$RUN/lanes/$name/lane.list" >"$C/$p/lane.list"
+      echo "$name" >"$C/$p/lane.name"
+    fi
+    (( $(count_lines "$C/$p/.done_ids") >= $(count_lines "$C/$p/lane.list") )) && continue
+    [[ -s "$RUN/lanes/$name/.done_ids" ]] && say "calibration ($p): note: lane $name already ran under load before these alone runs"
+    pin=(); command -v taskset >/dev/null && pin=(taskset -c "$cpus")
+    say "calibration ($p): $(count_lines "$C/$p/lane.list") configs ALONE on the CPUs of lane $name ($cpus), before the lanes start"
+    ${pin[@]+"${pin[@]}"} "$CM/$p-profiler/run-profiling.sh" --config-list "$C/$p/lane.list" --out "$C/$p" \
+      --data-dir "$C/$p/data" --warmup "$WARMUP" --reps "$REPS" --hours 1 --timeout 1800 --no-analyze --ephemeral-inputs \
+      --tag "calibration-alone" >>"$C/$p/runner.out" 2>&1 </dev/null \
+      || say "calibration ($p): runner failed (see $C/$p/runner.out); the collection goes on without it"
+  done
 }
 
 # ---- status ---------------------------------------------------------------------------------------
@@ -224,8 +282,9 @@ def lines(p):
 now = time.time()
 try:
     deadline = int(open(os.path.join(run, "deadline")).read())
-    left = (deadline - now) / 3600
-    print(f"deadline {time.strftime('%Y-%m-%d %H:%M', time.localtime(deadline))} ({left:.1f} h left)")
+    ready = int(open(os.path.join(run, "ready_by")).read())
+    fmt = lambda t: time.strftime('%a %Y-%m-%d %H:%M', time.localtime(t))
+    print(f"data ready by {fmt(ready)}; new configs until {fmt(deadline)} ({max(0, deadline - now) / 3600:.1f} h of collection left)")
 except (OSError, ValueError):
     pass
 print(f"{'lane':12} {'state':9} {'done':>6} {'failed':>6} {'list':>7} {'per h':>6}  current config")
@@ -291,6 +350,10 @@ merge_all() {
   (( ${#raws[@]} )) || { say "merge: no data yet"; return 0; }
   "$PYTHON" "$HERE/validate_data.py" "${raws[@]}" >"$RUN/data/validation.txt" 2>&1
   say "validation: $(grep -cE '^ *ERROR +[0-9.]+%' "$RUN/data/validation.txt") error checks hit, $(grep -E 'DATA OK|DATA HAS ERRORS|ERROR' "$RUN/data/validation.txt" | tail -1 | sed 's/^ *//')"
+  if [[ -d "$RUN/calibration" ]]; then
+    "$PYTHON" "$HERE/calibration_report.py" "$RUN" >"$RUN/data/calibration.txt" 2>&1
+    say "calibration: $(head -1 "$RUN/data/calibration.txt" | sed 's/^SUMMARY //')"
+  fi
   status_table >"$RUN/STATUS.txt" 2>&1
   local tmp="$RUN/export/tmp"; rm -rf "$tmp"; mkdir -p "$tmp/wayang-cost-data/lane-logs"
   cp -R "$RUN/data/." "$tmp/wayang-cost-data/"
@@ -354,15 +417,21 @@ start_cmd() {
   say "================ collect start (pid $$) ================"
   cat "$RUN/env.txt" | tee -a "$LOG" >/dev/null
 
-  if [[ -n "$UNTIL" ]]; then
-    local t; t=$(date -d "$UNTIL" +%s 2>/dev/null || date -j -f '%Y-%m-%d %H:%M' "$UNTIL" +%s 2>/dev/null) || { say "cannot read --until '$UNTIL' (use \"YYYY-MM-DD HH:MM\")"; exit 2; }
-    echo "$t" >"$RUN/deadline"
-  elif [[ -n "$HOURS" ]]; then
-    "$PYTHON" -c "import time; print(int(time.time() + float('$HOURS') * 3600))" >"$RUN/deadline"
-  elif [[ ! -s "$RUN/deadline" ]]; then
-    "$PYTHON" -c "import time; print(int(time.time() + 60 * 3600))" >"$RUN/deadline"
+  # ready_by: when the final dataset must exist. deadline: when the lanes stop starting new configs.
+  local t=""
+  if [[ -n "$HOURS" ]]; then
+    t=$("$PYTHON" -c "import time; print(int(time.time() + float('$HOURS') * 3600))")
+  elif [[ -n "$UNTIL" || ! -s "$RUN/ready_by" ]]; then
+    local u="${UNTIL:-$DEFAULT_READY_BY}"
+    t=$(date -d "$u" +%s 2>/dev/null || date -j -f '%Y-%m-%d %H:%M' "$u" +%s 2>/dev/null) || { say "cannot read --until '$u' (use \"YYYY-MM-DD HH:MM\")"; exit 2; }
   fi
-  say "deadline: $(fmt_time "$(cat "$RUN/deadline")") ($(( ($(cat "$RUN/deadline") - $(now)) / 3600 )) h from now)"
+  [[ -n "$t" ]] && echo "$t" >"$RUN/ready_by"
+  READY_BY=$(cat "$RUN/ready_by")
+  if (( TEST )); then echo "$READY_BY" >"$RUN/deadline"
+  else echo $(( READY_BY - STOP_NEW_MIN * 60 )) >"$RUN/deadline"; fi
+  (( $(cat "$RUN/deadline") > $(now) + 600 )) || { say "the data would have to be ready by $(fmt_time "$READY_BY"): too soon (or already past). Use --until with a later time."; exit 2; }
+  say "data ready by: $(fmt_time "$READY_BY")  |  new configs until $(fmt_time "$(cat "$RUN/deadline")")  ($(( ($(cat "$RUN/deadline") - $(now)) / 3600 )) h of collection)"
+  say "server clock now: $(date '+%F %T %Z')  (check this is the time zone you mean)"
 
   if [[ ! -s "$RUN/plan.json" ]]; then
     (( TEST )) && [[ -z "$PLAN" ]] && PLAN="cluster=2x1 java=1x2 spark=1x2 postgres=1x2"
@@ -386,6 +455,26 @@ import sys; p=sys.argv[1]; b=open(p,'rb').read(); c=b.rfind(b'\n')+1; open(p,'r+
   done
   rm -f "$RUN"/lanes/*/lane.finished
 
+  # Housekeeping CPUs (plan_lanes.py): this script, and so the merges and the status, run there, never on a lane's
+  # CPUs. Lanes leave this mask: run_lane_once pins each runner with taskset, run-cluster.sh pins its own JVMs.
+  local hk
+  hk=$("$PYTHON" -c "import json, sys; print(','.join(map(str, json.load(open(sys.argv[1])).get('housekeeping_cpus', []))))" "$RUN/plan.json")
+  if [[ -n "$hk" ]] && command -v taskset >/dev/null; then
+    taskset -cp "$hk" $$ >/dev/null && say "housekeeping (this script, merges, status) pinned to CPUs $hk"
+  fi
+  # The lanes run at the same time on purpose: the runners skip their one-profiler-at-a-time lock
+  # (../common/measure-gate.sh), and every row records the CPU other processes used on its lane's CPUs.
+  local n_lanes
+  n_lanes=$(lanes_tsv | wc -l | tr -d ' ')
+  export WAYANGPROF_LANES="$n_lanes"
+  (( TEST )) && export WAYANGPROF_ALLOW_BATTERY=1
+  if (( n_lanes > 1 )); then
+    # RAPL counts the whole CPU package, i.e. every lane at once: per lane it would be meaningless.
+    export JAVA_EXTRA="${JAVA_EXTRA:-} -Dwayangprof.raplPath=/nonexistent/rapl-off-while-lanes-share-the-package"
+    say "energy (RAPL) not recorded: $n_lanes lanes share the CPU package"
+  fi
+  calibrate_alone
+
   local pids=() line
   while IFS= read -r line; do
     lane_loop "$line" 2>>"$LOG" &     # a lane's own errors go to the log too
@@ -402,6 +491,11 @@ import sys; p=sys.argv[1]; b=open(p,'rb').read(); c=b.rfind(b'\n')+1; open(p,'r+
     alive=0
     for p in "${pids[@]}"; do kill -0 "$p" 2>/dev/null && alive=1; done
     (( alive )) || break
+    if (( ! TEST && $(now) >= READY_BY - HARD_STOP_MIN * 60 )); then
+      say "$HARD_STOP_MIN min before the data must be ready: stopping the configs still running (only those are lost)"
+      kill_tree "${pids[@]}"
+      break
+    fi
     sleep 30 & wait $!     # (wait, not sleep: a stop request is handled at once)
     tick=$((tick + 1))
     if (( tick % 20 == 0 )) || (( TEST && tick % 4 == 0 )); then

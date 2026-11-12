@@ -12,6 +12,9 @@ A lane is one profiler loop pinned (taskset) to its own CPUs:
             database CPU the profiler reads belongs to this lane only
   cluster   one Spark standalone cluster at a time: 2 CPUs for driver + master, then 1..10 executors of C CPUs
 
+Housekeeping: the last CPUs (one physical core by default, --housekeeping) belong to no lane. collect.sh runs
+itself, the merges and the status there, so that work never lands on a lane's CPUs during a measurement.
+
 CPUs are handed out by physical core (both hyperthreads of a core go to the same lane) and NUMA node in order,
 so lanes do not share a core's execution units. Memory is split: the cluster lane gets 40%, the other lanes share
 the rest in proportion to their CPUs; each lane's largest JVM heap is ~60% of its share.
@@ -84,10 +87,15 @@ def main():
     ap.add_argument("--plan", default="", help='e.g. "cluster=10x3 java=4x2 spark=3x4 postgres=2x6" (lanes x CPUs; '
                                                'cluster=NxC: up to N executors of C CPUs; "cluster=0" = none)')
     ap.add_argument("--base-port", type=int, default=7300, help="first port (Spark masters, PostgreSQL servers)")
+    ap.add_argument("--housekeeping", type=int, default=-1,
+                    help="CPUs kept free of lanes for collect.sh, merges and the OS (default: 2 on 24+ CPUs, 1 on 8+, else 0)")
     ap.add_argument("--text", action="store_true")
     a = ap.parse_args()
 
     cpus = topology(expand(a.cpus))
+    hk_n = a.housekeeping if a.housekeeping >= 0 else (2 if len(cpus) >= 24 else 1 if len(cpus) >= 8 else 0)
+    housekeeping = cpus[len(cpus) - hk_n:] if hk_n else []  # last in topology order: siblings of one core
+    cpus = cpus[:len(cpus) - hk_n]
     k = len(cpus)
     if a.plan:
         n_exec, c, lanes = 0, 0, []
@@ -106,10 +114,11 @@ def main():
 
     need = (2 + n_exec * c if n_exec else 0) + sum(n * per for _, n, per in lanes)
     if need > k:
-        sys.exit(f"the plan needs {need} CPUs but only {k} are available: use --plan with fewer lanes")
+        sys.exit(f"the plan needs {need} CPUs but only {k} are available ({len(housekeeping)} more kept for "
+                 f"housekeeping): use --plan with fewer lanes")
 
     mem = a.mem_gb
-    plan = {"cpus_total": k, "mem_gb": mem, "lanes": []}
+    plan = {"cpus_total": k + len(housekeeping), "mem_gb": mem, "housekeeping_cpus": housekeeping, "lanes": []}
     pos = 0
     port = a.base_port
     # Memory weight: Java lanes count double (one CPU, but the big sort / group / join inputs need a 4g+ heap).
@@ -117,11 +126,25 @@ def main():
     rest_w = sum(n * per * weight[p] for p, n, per in lanes)
     cluster_mem = 0.4 * mem if n_exec else 0
     if n_exec:
+        # The executors need >= 1 GB heap each (same formula as run-cluster.sh): take more memory for the cluster
+        # lane if 40% is not enough, as long as the other lanes keep at least half; otherwise stop with a clear message.
+        driver = 8 if cluster_mem >= 64 else 4
+        need = (driver + 0.5 * (n_exec + 1) + 2 + n_exec * 1.2 * 1) / 0.75
+        if cluster_mem < need:
+            if need <= 0.5 * mem:
+                cluster_mem = need + 1
+            else:
+                fit = int((0.5 * mem * 0.75 - driver - 2.5) // 1.7)
+                hint = f"cluster={fit}x{c}" if fit >= 1 else "cluster=0"
+                sys.exit(f"{mem:.0f} GB memory is not enough for a cluster of {n_exec} executors ({need:.0f} GB) next to the "
+                         f"other lanes: use --plan with fewer executors (e.g. {hint}) or more --mem-gb")
         take = cpus[pos:pos + 2 + n_exec * c]
         pos += len(take)
         plan["lanes"].append({"name": "cluster", "platform": "spark-cluster", "cpus": take, "reserve": 2,
                               "executors": n_exec, "executor_cores": c, "mem_gb": round(cluster_mem, 1),
-                              "driver_heap": "8g" if cluster_mem >= 64 else "4g", "port": port})
+                              "driver_heap": f"{driver}g", "port": port,
+                              "executor_heap_gb": max(1, min(8, int((cluster_mem * 0.75 - driver - 0.5 * (n_exec + 1) - 2)
+                                                                    / (n_exec * 1.2))))})
         port += 10
     other_mem = mem - cluster_mem
     for platform, n, per in lanes:
@@ -134,9 +157,10 @@ def main():
             port += 1
     plan["cpus_used"] = pos
     if a.text:
-        print(f"{k} CPUs, {mem:.0f} GB memory -> {len(plan['lanes'])} lanes, {pos} CPUs used")
+        print(f"{k + len(housekeeping)} CPUs, {mem:.0f} GB memory -> {len(plan['lanes'])} lanes, {pos} CPUs used, "
+              f"housekeeping on CPUs {','.join(map(str, housekeeping)) or 'none'}")
         for l in plan["lanes"]:
-            extra = (f"executors 1..{l['executors']} x {l['executor_cores']} CPUs, driver {l['driver_heap']}"
+            extra = (f"executors 1..{l['executors']} x {l['executor_cores']} CPUs, {l['executor_heap_gb']}g each, driver {l['driver_heap']}"
                      if l["platform"] == "spark-cluster" else f"heaps up to {l['max_heap_gb']}g")
             print(f"  {l['name']:11} CPUs {len(l['cpus']):3}  memory {l['mem_gb']:6.1f} GB  port {l['port']}  {extra}")
     else:

@@ -21,6 +21,9 @@ import statistics
 import sys
 from collections import defaultdict
 
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "common"))
+import run_checks  # noqa: E402  (disturbed-run checks shared by all profilers: clock, other processes)
+
 # Columns that describe the run rather than measure it. They are copied, not subtracted.
 ID_COLS = [
     "resource", "config_id", "operator", "wayang_operator", "spark_execution_operator",
@@ -33,7 +36,7 @@ ID_COLS = [
     "spark_version", "spark_master", "deploy_mode", "executors", "task_slots", "shuffle_partitions",
     "in_partitions", "right_in_partitions", "serializer",
     # cluster shape and how the run was measured
-    "executor_cores", "executor_memory_bytes", "shuffle_host_local_disk", "wall_exec_from", "warmup_runs",
+    "executor_cores", "executor_memory_bytes", "shuffle_host_local_disk", "wall_exec_from", "warmup_runs", "spin_up_ms",
 ]
 # Columns that are neither features nor metrics to subtract.
 SKIP_COLS = {"timestamp", "run_id", "plan", "pair", "plan_execution_operators", "spark_listener_drained",
@@ -117,6 +120,9 @@ def main():
     ap.add_argument("raw", help="raw.csv written by the profiler")
     ap.add_argument("--out", default=None, help="output folder (default: next to raw.csv)")
     ap.add_argument("--quiet", action="store_true", help="do not print the summary table")
+    ap.add_argument("--keep-disturbed", action="store_true",
+                    help="keep pairs with a disturbed run (low CPU clock, other processes busy) in the per-config "
+                         "medians; by default they are only kept, flagged, in pairs.csv")
     args = ap.parse_args()
     out_dir = args.out or os.path.dirname(os.path.abspath(args.raw))
     os.makedirs(out_dir, exist_ok=True)
@@ -127,6 +133,7 @@ def main():
         rows = list(reader)
     if not rows:
         sys.exit("raw.csv has no rows")
+    run_checks.annotate(rows)  # eff_ghz, foreign_cpu_cores, clock_ok, quiet_ok per run
 
     id_cols = [c for c in ID_COLS if c in header]
     metric_cols = [
@@ -144,6 +151,7 @@ def main():
     by_config = defaultdict(list)       # config_id -> list of (operator row, baseline row, delta dict)
     dropped = 0
     stolen = 0
+    n_disturbed = defaultdict(int)
     undrained = 0
     for (run_id, pair), d in pairs.items():
         if "baseline" not in d or "operator" not in d:
@@ -167,7 +175,11 @@ def main():
             rec[c] = o.get(c, "")
         rec["baseline_out_rows"] = b.get("out_rows", "")
         rec.update({c: fmt(v) for c, v in delta.items()})
+        rec.update(run_checks.pair_flags(o, b))
         pair_rows.append(rec)
+        if rec["disturbed"] == "1" and not args.keep_disturbed:
+            n_disturbed[o["config_id"]] += 1  # kept in pairs.csv (flagged), left out of the per-config medians
+            continue
         by_config[o["config_id"]].append((o, b, delta))
 
     # pairs.csv
@@ -178,6 +190,7 @@ def main():
         o0 = items[0][0]
         rec = {c: o0.get(c, "") for c in id_cols}
         rec["n_pairs"] = len(items)
+        rec["n_pairs_disturbed"] = n_disturbed.get(cid, 0)
         for c in OPERATOR_SIDE:
             vals = [num(o.get(c)) for o, _, _ in items]
             vals = [v for v in vals if v is not None]
@@ -215,7 +228,7 @@ def main():
                           num(r.get("sel")) or 0, num(r.get("words")) or 0)
     cost_rows.sort(key=sort_key)
     base_rows.sort(key=sort_key)
-    cost_header = id_cols + ["n_pairs"] + OPERATOR_SIDE + ["cpu_signal_ok", "cpu_signal_to_noise"] + \
+    cost_header = id_cols + ["n_pairs", "n_pairs_disturbed"] + OPERATOR_SIDE + ["cpu_signal_ok", "cpu_signal_to_noise"] + \
         [x for c in SIGNAL_METRICS for x in (c + "_signal_ok", c + "_signal_to_noise")]
     for c in metric_cols:
         cost_header += [c, c + "_iqr"]
@@ -226,7 +239,7 @@ def main():
         cfg = by_id.get(p["config_id"], {})
         for k in flags:
             p[k] = cfg.get(k, "")
-    pair_header = id_cols + ["run_id", "pair"] + OPERATOR_SIDE + ["baseline_out_rows"] + metric_cols + flags
+    pair_header = id_cols + ["run_id", "pair"] + OPERATOR_SIDE + ["baseline_out_rows"] + run_checks.PAIR_COLS + metric_cols + flags
     write_csv(os.path.join(out_dir, "pairs.csv"), pair_header, pair_rows)
     write_csv(os.path.join(out_dir, "baseline_costs.csv"), id_cols + ["n_runs", "out_rows"] + metric_cols, base_rows)
 
@@ -234,6 +247,11 @@ def main():
           f"pairs disturbed by VM steal time dropped: {stolen}  "
           f"pairs with incomplete Spark metrics dropped: {undrained}")
     print(f"wrote {out_dir}/pairs.csv, operator_costs.csv, baseline_costs.csv")
+    n_dist = sum(1 for p in pair_rows if p["disturbed"] == "1")
+    lost = sorted(c for c in n_disturbed if c not in by_config)
+    print(f"disturbed-run check: {run_checks.summary(rows)}. {n_dist} pairs disturbed: "
+          + ("kept in the medians (--keep-disturbed)" if args.keep_disturbed else
+             f"flagged in pairs.csv, left out of operator_costs.csv ({len(lost)} configs have no clean pair left)"))
     if not args.quiet:
         print_summary(cost_rows)
 

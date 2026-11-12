@@ -14,11 +14,15 @@
 // Sources:
 //   proc_pid_rusage(RUSAGE_INFO_V6)  -> CPU time, instructions, cycles, energy, disk I/O, memory footprint, ...
 //   proc_pidinfo(PROC_PIDTASKINFO)   -> page faults, context switches, syscalls, threads, virtual/resident size
+//   host_processor_info              -> busy time of ALL CPUs of the machine (sys_busy_ns, sys_cpus): busy time minus
+//                                       the measured processes' own CPU time = what other processes ran meanwhile
+//                                       (analyze.py: foreign_cpu_cores), so a disturbed run can be detected
 // Any process of the same user can be read (e.g. a PostgreSQL server started by this user).
 //
 // Build: cc -O2 -o pidrusage pidrusage.c
 #include <errno.h>
 #include <libproc.h>
+#include <mach/mach.h>
 #include <mach/mach_time.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -26,8 +30,10 @@
 #include <string.h>
 #include <sys/proc_info.h>
 #include <sys/resource.h>
+#include <unistd.h>
 
 static double ticks_to_ns;
+static long cpu_tick_ns;  // length of one host_processor_info tick (1 / CLK_TCK)
 
 static void c(const char *name, uint64_t v) { printf("c:%s=%llu ", name, (unsigned long long)v); }
 static void g(const char *name, uint64_t v) { printf("g:%s=%llu ", name, (unsigned long long)v); }
@@ -106,6 +112,24 @@ static int reading(int pid) {
         g("threads", (uint32_t)ti.pti_threadnum);
         g("threads_running", (uint32_t)ti.pti_numrunning);
     }
+
+    // Whole machine: busy (user + system + nice) and idle time summed over all CPUs.
+    natural_t ncpu = 0;
+    processor_info_array_t info = NULL;
+    mach_msg_type_number_t ninfo = 0;
+    if (host_processor_info(mach_host_self(), PROCESSOR_CPU_LOAD_INFO, &ncpu, &info, &ninfo) == KERN_SUCCESS) {
+        uint64_t busy = 0, idle = 0;
+        processor_cpu_load_info_t load = (processor_cpu_load_info_t)info;
+        for (natural_t i = 0; i < ncpu; i++) {
+            busy += (uint64_t)load[i].cpu_ticks[CPU_STATE_USER] + load[i].cpu_ticks[CPU_STATE_SYSTEM]
+                    + load[i].cpu_ticks[CPU_STATE_NICE];
+            idle += load[i].cpu_ticks[CPU_STATE_IDLE];
+        }
+        vm_deallocate(mach_task_self(), (vm_address_t)info, ninfo * sizeof(integer_t));
+        c("sys_busy_ns", busy * (uint64_t)cpu_tick_ns);
+        c("sys_idle_ns", idle * (uint64_t)cpu_tick_ns);
+        g("sys_cpus", ncpu);
+    }
     printf("\n");
     fflush(stdout);
     return 0;
@@ -119,6 +143,8 @@ int main(int argc, char **argv) {
     mach_timebase_info_data_t tb;
     mach_timebase_info(&tb);
     ticks_to_ns = (double)tb.numer / (double)tb.denom;
+    long hz = sysconf(_SC_CLK_TCK);
+    cpu_tick_ns = 1000000000L / (hz > 0 ? hz : 100);
 
     if (strcmp(argv[1], "--serve") == 0) {
         char line[64];

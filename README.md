@@ -98,6 +98,8 @@ Every CSV row starts with the **features** that describe the config:
 | Spark only: `spark_master`, `deploy_mode`, `task_slots`, `shuffle_partitions`, `in_partitions` | Spark setup: `local[*]`, `local-single-node`, cores, shuffle partitions (2 × cores), input partitions |
 | `cpu_signal_ok`, `<metric>_signal_ok` | 1 if that cost (CPU; `wall_exec_ns`, `os_cycles`, `os_energy_nj`, ...) is larger than the measurement noise; drop rows with 0 for that target. In `operator_costs.csv` and `pairs.csv` |
 | `os_window` | `exec` = OS counters cover first record → job end (like `wall_exec_ns`); `run` = whole `execute()` calls |
+| `clock_ok`, `quiet_ok`, `disturbed` | was a run of the pair disturbed (see [Measurement validity](#measurement-validity)); `disturbed = 1` pairs are left out of `operator_costs.csv` and of training. In `pairs.csv` |
+| `pcore_ghz`, `eff_ghz`, `pcore_share`, `foreign_cpu_cores`, `lane_foreign_cpu_cores` | the values behind those flags: CPU clock on the performance cores / all cores, share of CPU on performance cores, cores other processes used during the run (machine / own lane). In `pairs.csv` |
 
 followed by the **measured resource usage**:
 
@@ -145,15 +147,50 @@ lists are in [java-profiler/README.md](java-profiler/README.md#what-is-measured)
 **Current coverage** (Apple M4 Pro, 12 cores, 24 GB RAM, macOS, Java 17), all 13 operators, inputs from 1k
 to 1M rows (10k, 30k, 100k, 300k, 1M; cartesian 1k–10k × 10–1,000), every row with Wayang's estimates:
 
-| Platform | Settings (configs) | Configs | Rows in `pairs.csv` |
-|---|---|---|---|
-| Java | `heap4g-G1-cpuall` (125), `heap1g-Serial-cpu2` (118) | 243 | 765 |
-| Spark | `heap4g-G1-cpuall` (125), `heap4g-G1-cpu4` (125), `heap1g-Serial-cpu2` (3) | 253 | 795 |
+| Platform | Folder | Settings (configs) | Configs | Rows in `pairs.csv` | Disturbed pairs | Configs with a clean pair |
+|---|---|---|---|---|---|---|
+| Java | `java-profiler/results-2026-11-02/` | `heap4g-G1-cpuall` (125), `heap1g-Serial-cpu2` (118) | 243 | 765 | 63 | 234 |
+| Spark | `spark-profiler/results/` | `heap4g-G1-cpuall` (125), `heap4g-G1-cpu4` (125), `heap1g-Serial-cpu2` (3) | 253 | 795 | 165 | 210 |
 
 Most configs were measured with 2 warm-up + 3 pairs (`--tag demo`, 2 Nov 2026); the first 9–18 configs with
-3 + 7. Running `./run-profiling.sh` in either folder adds more and continues where it left off.
+3 + 7. This data comes from the profiler before the fixes listed under
+[Measurement validity](#measurement-validity): use its `os_*` columns (cycles, instructions, energy) with care, and
+re-measure (`remeasure-configs.txt` in each profiler folder). `java-profiler/results-2026-11-12-concurrent/` was
+measured while other profilers ran and is not training data.
+
+## Measurement validity
+
+Checked on 12 Nov 2026 (audit of the data above); what was found and what the profilers now do about it:
+
+| Problem | Evidence | Now |
+|---|---|---|
+| **Low CPU clock** (battery / Low Power Mode) | The first sessions (Java 31 Oct, Spark 2 Nov 05:30 UTC, plus a few minutes at 09:55 UTC) ran at a hard cap of ~2.6 GHz on the performance cores instead of ~4.0; the same 1M-row join took 736 ms of CPU there and 463 ms on mains power | The runners **wait** until the Mac is on mains power with Low Power Mode off (`common/measure-gate.sh`); every run records its clock and `clock_ok` flags runs below 80% of what the chip reaches |
+| **Other profilers running at the same time** | Runs of 12 Nov 17:16: five profiler launches within 4 min, load 11–15 on 12 cores, CPU time of one plan varied 1.7× | A machine-wide lock: the runners measure **one config at a time per machine** and wait for each other; any profiler JVM started otherwise is waited for too |
+| **Other programs busy** | not measurable in the old data | Every run records the CPU all other processes used meanwhile (`foreign_cpu_cores`); `quiet_ok = 0` above 1 core (on a server lane: 0.25 cores on its own CPUs) |
+| **Clock ramp-up** | Runs with 20–50 ms of CPU averaged 2.3–3.1 GHz, longer ones ~4.0: the pause before each run lets the cores clock down, and operator and baseline runs (different lengths) are hit differently | A 50 ms CPU spin right before each measured run (`--spin-up-ms`, not measured) |
+| **OS counters over a wider window** (old profiler) | In the data above, OS CPU time is up to 2× the process's CPU time: `os_cycles`, `os_instructions`, `os_energy_nj` cover more than `wall_exec_ns` | Fixed (`os_window = exec`). For old rows: CPU, wall and memory columns are fine; `pcore_ghz` is still valid (cycles and CPU time from the same reading) |
+| **Server lanes run side by side** | they share cache, memory bandwidth, disk and power | Calibration (same configs alone vs. under load), housekeeping CPUs, energy off: see [server/README.md](server/README.md) |
+
+`analyze.py` flags a pair `disturbed = 1` if either run has `clock_ok = 0` or `quiet_ok = 0`; such pairs stay in
+`pairs.csv` but are left out of `operator_costs.csv` / `baseline_costs.csv` (`--keep-disturbed` keeps them), and
+`model/train.py` leaves them out (`--keep-disturbed`). The checks are in `common/run_checks.py`.
+
+**Before measuring on the Mac**: mains power, Low Power Mode off, no other heavy program (other Claude sessions,
+builds, model training). `WAYANGPROF_ALLOW_BATTERY=1` overrides the power check (tests only).
+
+**Re-measuring** the configs of the old data into a fresh folder (the runners skip configs already in the
+output's `raw.csv`, so do not reuse the old folder):
+
+```bash
+cd java-profiler  && ./run-profiling.sh --config-list remeasure-configs.txt --out results     # Java
+cd spark-profiler && ./run-profiling.sh --config-list remeasure-configs.txt --out results-new # Spark
+```
 
 ## Results: the cost model vs Wayang
+
+> These numbers were computed **before** the validity checks above, on all pairs including the 228 now flagged
+> `disturbed` (the 2.6 GHz sessions hold the largest sort and join configs). Retrain (`model/train.py` now leaves
+> disturbed pairs out) and, better, re-measure before using them in the paper.
 
 The cost model in [`model/`](model/README.md) is trained on this data and compared with Wayang's own
 estimates. q-error = max(predicted / measured, measured / predicted): how many times off, 1 is perfect

@@ -173,6 +173,8 @@ def main():
     ap.add_argument("--init-from", default=None, help="start from a trained model.pt")
     ap.add_argument("--few-shot", action="store_true", help="with --init-from: train only platform parameters")
     ap.add_argument("--seed", type=int, default=0)
+    ap.add_argument("--keep-disturbed", action="store_true",
+                    help="also train/test on pairs analyze.py flagged disturbed=1 (low CPU clock, other processes busy)")
     args = ap.parse_args()
 
     torch.manual_seed(args.seed)
@@ -188,6 +190,12 @@ def main():
         if not os.path.exists(p):
             print(f"WARNING: {p} not found, skipped", file=sys.stderr)
     rows = load_rows([p for p in args.data if os.path.exists(p)])
+    if not args.keep_disturbed:
+        # A pair with a run measured at a capped CPU clock or next to other busy processes is not the operator's cost.
+        n = len(rows)
+        rows = [r for r in rows if r.get("disturbed") != "1"]
+        if len(rows) < n:
+            print(f"left out {n - len(rows)} disturbed pairs (disturbed=1 in pairs.csv; --keep-disturbed keeps them)")
     if not rows:
         raise SystemExit(f"no rows found in {args.data}")
     check_data(rows)

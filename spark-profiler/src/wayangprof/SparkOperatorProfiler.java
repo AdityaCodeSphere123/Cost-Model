@@ -772,6 +772,22 @@ public final class SparkOperatorProfiler {
             }
         }
 
+        /** "0-3,8,10-11" (Cpus_allowed_list) -> {0,1,2,3,8,10,11}; empty if missing or unreadable. */
+        static java.util.Set<Integer> parseCpuList(String list) {
+            java.util.Set<Integer> out = new java.util.HashSet<>();
+            if (list == null || list.isEmpty()) return out;
+            try {
+                for (String part : list.split(",")) {
+                    String[] ab = part.trim().split("-");
+                    int a = Integer.parseInt(ab[0]), b = ab.length > 1 ? Integer.parseInt(ab[1]) : a;
+                    for (int i = a; i <= b; i++) out.add(i);
+                }
+            } catch (NumberFormatException e) {
+                out.clear();
+            }
+            return out;
+        }
+
         private void readLinux(OsSnap s) {
             Path proc = Paths.get(PROC_ROOT);
             try {
@@ -802,11 +818,13 @@ public final class SparkOperatorProfiler {
                 s.counters.put("pageins", Long.parseLong(f[9]));
                 s.counters.put("user_ns", Long.parseLong(f[11]) * 10_000_000L);
                 s.counters.put("system_ns", Long.parseLong(f[12]) * 10_000_000L);
+                String allowedList = null;  // CPUs this process may run on (its lane when pinned with taskset)
                 for (String l : Files.readAllLines(proc.resolve("self/status"))) {
                     String[] kv = l.split(":\\s*");
                     if (kv.length != 2) continue;
                     String v = kv[1].trim().split("\\s+")[0];
                     switch (kv[0]) {
+                        case "Cpus_allowed_list": allowedList = v; break;
                         case "voluntary_ctxt_switches": s.counters.put("context_switches_voluntary", Long.parseLong(v)); break;
                         case "nonvoluntary_ctxt_switches": s.counters.put("context_switches_involuntary", Long.parseLong(v)); break;
                         case "VmRSS": s.gauges.put("resident_bytes", Long.parseLong(v) * 1024); break;
@@ -817,19 +835,36 @@ public final class SparkOperatorProfiler {
                         default: break;
                     }
                 }
-                // Whole machine, from the "cpu" line of /proc/stat (clock ticks): time waiting for disk, and steal =
-                // time the hypervisor gave this VM's CPUs to other VMs. Steal > 0 means the run was disturbed.
-                long machineCpus = 0;
+                // Whole machine, from /proc/stat (clock ticks of 10 ms): busy time of all CPUs (sys_busy_ns) and of the
+                // CPUs this process may run on (lane_busy_ns, only when pinned to a subset), time waiting for disk, and
+                // steal = time the hypervisor gave this VM's CPUs to other VMs. Busy time minus this process's own CPU
+                // time is what OTHER processes ran meanwhile: analyze.py turns it into foreign_cpu_cores and flags
+                // disturbed runs. Steal > 0 also means the run was disturbed.
+                java.util.Set<Integer> allowed = parseCpuList(allowedList);
+                long machineCpus = 0, laneCpus = 0, laneBusy = 0;
                 for (String l : Files.readAllLines(proc.resolve("stat"))) {
-                    if (l.startsWith("cpu ")) {
-                        String[] c = l.trim().split("\\s+");  // cpu user nice system idle iowait irq softirq steal ...
-                        if (c.length > 5) s.counters.put("sys_iowait_ns", Long.parseLong(c[5]) * 10_000_000L);
+                    if (!l.startsWith("cpu")) continue;
+                    String[] c = l.trim().split("\\s+");  // cpuN user nice system idle iowait irq softirq steal ...
+                    if (c.length < 8) continue;
+                    long busy = (Long.parseLong(c[1]) + Long.parseLong(c[2]) + Long.parseLong(c[3])
+                            + Long.parseLong(c[6]) + Long.parseLong(c[7])) * 10_000_000L;
+                    if (c[0].equals("cpu")) {
+                        s.counters.put("sys_busy_ns", busy);
+                        s.counters.put("sys_iowait_ns", Long.parseLong(c[5]) * 10_000_000L);
                         if (c.length > 8) s.counters.put("sys_steal_ns", Long.parseLong(c[8]) * 10_000_000L);
-                    } else if (l.startsWith("cpu") && l.length() > 3 && Character.isDigit(l.charAt(3))) {
+                    } else if (Character.isDigit(c[0].charAt(3))) {
                         machineCpus++;  // cpu0, cpu1, ...: the whole machine, unlike -XX:ActiveProcessorCount
+                        if (allowed.contains(Integer.parseInt(c[0].substring(3)))) {
+                            laneCpus++;
+                            laneBusy += busy;
+                        }
                     }
                 }
                 if (machineCpus > 0) s.gauges.put("sys_cpus", machineCpus);
+                if (laneCpus > 0 && laneCpus < machineCpus) {
+                    s.counters.put("lane_busy_ns", laneBusy);
+                    s.gauges.put("lane_cpus", laneCpus);
+                }
                 // RAPL energy of the whole CPU package (not only this process), if readable.
                 Path rapl = Paths.get(RAPL_PATH);
                 if (Files.isReadable(rapl)) {
@@ -878,6 +913,7 @@ public final class SparkOperatorProfiler {
         // configs are measured with JIT-compiled code too. At most maxExtraWarmup runs or 10 s.
         long minWarmupRows = 3_000_000;
         int maxExtraWarmup = 20;
+        long spinUpMs = 50;              // CPU spin right before every measured run, see spinUp()
 
         boolean binary() {
             return BINARY.contains(this.op);
@@ -935,6 +971,7 @@ public final class SparkOperatorProfiler {
                 case "--executor-memory": c.executorMemory = v; i++; break;
                 case "--min-warmup-rows": c.minWarmupRows = Long.parseLong(v); i++; break;
                 case "--max-extra-warmup": c.maxExtraWarmup = Integer.parseInt(v); i++; break;
+                case "--spin-up-ms": c.spinUpMs = Long.parseLong(v); i++; break;
                 case "-h": case "--help": usage(); System.exit(0); break;
                 default: System.err.println("Unknown argument: " + a); usage(); System.exit(2);
             }
@@ -965,7 +1002,7 @@ public final class SparkOperatorProfiler {
         System.err.println("Usage: SparkOperatorProfiler --op <op> [--source text|collection] [--rows N] [--right-rows N]\n"
                 + "         [--keys K] [--sel S] [--words W] [--warmup N] [--reps N] [--cores N|all] [--data-dir D]\n"
                 + "         [--out raw.csv] [--tmp-dir D] [--pidrusage path] [--cold-cmd \"sudo -n purge\"]\n"
-                + "         [--resource label] [--tag t] [--min-warmup-rows N] [--max-extra-warmup N]\n"
+                + "         [--resource label] [--tag t] [--min-warmup-rows N] [--max-extra-warmup N] [--spin-up-ms 50]\n"
                 + "         [--master spark://host:port --executors N --executor-cores C --executor-memory 4g]\n"
                 + "                             (standalone cluster instead of local mode)\n"
                 + "         [--estimate-only]   (write only Wayang's estimates for the baseline and operator plan to --out)\n"
@@ -1057,6 +1094,35 @@ public final class SparkOperatorProfiler {
     static volatile long BURN_SINK;
 
     /** Pure CPU work: n rounds of xorshift, no allocation, no memory traffic. */
+    /**
+     * Keeps {@code threads} CPUs busy for {@code ms} right before a measured run (not measured). The pause in
+     * quiesce() lets the cores clock down, and a run that starts at a low clock reads too much CPU time for its
+     * first tens of ms: in the data of 2 and 12 Nov 2026, runs with 20-50 ms of CPU averaged 2.3-3.1 GHz on the
+     * performance cores, runs over 300 ms ~4.0 GHz. Baseline and operator runs differ in length, so this does
+     * not cancel in their difference, and operators in a real job run back to back at full clock.
+     */
+    static void spinUp(int threads, long ms) {
+        if (ms <= 0) return;
+        final long end = System.nanoTime() + ms * 1_000_000L;
+        List<Thread> helpers = new ArrayList<>();
+        for (int i = 1; i < threads; i++) {
+            Thread t = new Thread(() -> {
+                while (System.nanoTime() < end) burn(10_000);
+            }, "wayangprof-spinup-" + i);
+            t.setDaemon(true);
+            t.start();
+            helpers.add(t);
+        }
+        while (System.nanoTime() < end) burn(10_000);
+        for (Thread t : helpers) {
+            try {
+                t.join();
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+            }
+        }
+    }
+
     static void burn(long n) {
         long x = 88172645463325252L;
         for (long i = 0; i < n; i++) {
@@ -1343,6 +1409,7 @@ public final class SparkOperatorProfiler {
         OUT_ROWS.set(0);
         runCold(c);
         quiesce();
+        spinUp(c.cluster() ? 1 : c.coreCount(), c.spinUpMs);  // start at full clock, see spinUp()
         Map<String, Object> m = new LinkedHashMap<>();
         m.put("sys_load_avg_1m", OSMX.getSystemLoadAverage());
         m.put("sys_free_memory_bytes", OSMX.getFreeMemorySize());
@@ -1772,6 +1839,7 @@ public final class SparkOperatorProfiler {
         env.put("right_in_partitions", rightPartitions);
         env.put("serializer", jsc.getConf().get("spark.serializer", "org.apache.spark.serializer.JavaSerializer"));
         env.put("os_probe", os.kind());
+        env.put("spin_up_ms", c.spinUpMs);
         if (c.op.equals("burn")) env.put("burn_calibrated_ns_per_row", burnCalibration(c.work));
         if (c.op.equals("burn") || c.op.equals("sleep")) env.put("work", c.work);
 

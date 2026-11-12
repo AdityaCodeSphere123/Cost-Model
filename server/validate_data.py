@@ -8,8 +8,12 @@ allowed to be small (noise, a busy machine). Exit code 1 if any ERROR check fail
 """
 import csv
 import math
+import os
 import sys
 from collections import defaultdict
+
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "common"))
+import run_checks  # noqa: E402
 
 BINARY = {"join", "union", "cartesian"}
 
@@ -106,6 +110,23 @@ def check_file(path):
         check("WARN", f"energy not measured ({col} empty)", rows, lambda r: r.get(col, "") == "")
     else:
         results.append(("WARN", "no energy counter on this machine (RAPL not readable)", len(rows), len(rows)))
+
+    # Disturbed runs (../common/run_checks.py): low CPU clock (battery, Low Power Mode, throttling) or other processes
+    # busy during the run (on a lane's own CPUs when pinned, else on the whole machine). analyze.py leaves such pairs
+    # out of operator_costs.csv.
+    run_checks.annotate(rows)
+    judged = [r for r in rows if r["clock_ok"] in ("0", "1")]
+    if judged:
+        check("WARN", "CPU clock < 80% of what this CPU reaches (battery, Low Power Mode, throttling)", judged,
+              lambda r: r["clock_ok"] == "0")
+    judged = [r for r in rows if r["quiet_ok"] in ("0", "1")]
+    if judged:
+        lane = any(r.get("os_lane_busy_ns") for r in judged)
+        check("WARN", "other processes busy on this run's own CPUs (> 0.25 cores; lanes: not another lane)" if lane
+              else "other processes busy on the machine during the run (> 1 core)", judged, lambda r: r["quiet_ok"] == "0")
+    elif "os_sys_busy_ns" not in rows[0]:
+        results.append(("WARN", "no machine busy-time counter (old profiler): other processes cannot be detected",
+                        len(rows), len(rows)))
 
     # Noise: spread of the main CPU metric between the pairs of one config (operator - baseline).
     cpu_col = "task_cpu_ns" if spark else "wall_exec_ns" if postgres else "thread_cpu_exec_ns"

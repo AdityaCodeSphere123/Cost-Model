@@ -28,6 +28,8 @@
 set -uo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=../common/measure-gate.sh
+source "$HERE/../common/measure-gate.sh"  # waits for mains power and for other profilers before each config
 ROOT="$(cd "$HERE/../.." && pwd)"
 
 WAYANG_SRC="${WAYANG_SRC:-$ROOT/wayang}"
@@ -313,6 +315,7 @@ for entry in "${CONFIGS[@]}"; do
   elapsed=$(( $(date +%s) - START )); ran=$(( DONE - RESUMED - 1 ))
   eta="?"; (( ran > 0 )) && eta="$(( elapsed * (TOTAL - DONE + 1) / ran / 60 ))min"
   say "[$DONE/$TOTAL] $id   (eta $eta)"
+  gate_enter  # mains power, no other profiler measuring (../common/measure-gate.sh)
   flags=$(resource_flags "$res") || exit 2
   # shellcheck disable=SC2207
   pg_args=($(resource_pg_args "$res"))
@@ -332,6 +335,7 @@ for entry in "${CONFIGS[@]}"; do
     --resource "$label" --tag "$TAG" ${PROFILER_ARGS:-} \
     </dev/null >>"$LOG" 2>&1
   rc=$?
+  gate_leave
   (( rc == 0 )) && echo "$id" >>"$DONE_IDS"
   if (( EPHEMERAL )); then
     rm -f "$DATA_DIR/rows-${n}_keys-${k}_words-${w}_seed-42.csv" "$DATA_DIR/rows-${right}_keys-${k}_words-${w}_seed-43.csv"

@@ -1,0 +1,2 @@
+Measured 12 Nov 2026 17:16-17:18 IST while other profiler runs were active on the same Mac (load 11-15 on 12 cores,
+thread CPU of one plan varied up to 1.7x). Do not use as training data; kept only for reference.

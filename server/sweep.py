@@ -195,6 +195,11 @@ def main():
             for attempt in range(300):
                 # Prefer the main setting; once its unique configs for this operator run out, use others.
                 c = sample(rng, op, main_res, others, p_main=0.6 if attempt < 100 else 0.0)
+                # Java: count over a collection source is answered from the collection's size (Stream.count() of a
+                # SIZED stream runs no element through the plan), so no row ever reaches the operator and there is
+                # no execution window to measure. Not a cost to learn: left out (Spark does iterate: kept there).
+                if c and args.platform == "java" and "|count|collection|" in c:
+                    continue
                 if c and c not in seen:
                     seen.add(c)
                     out.append(c)

@@ -6,3 +6,4 @@ collect/
 test-run/
 .deps/
 prepare.log
+.measure.lock/

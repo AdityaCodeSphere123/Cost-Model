@@ -18,7 +18,7 @@ tar xzf cost-model-server.tar.gz && cd cost-model-server/Cost-Model/server
                     #   -> ends with "prepare DONE"; from here on the internet can be off
 ./test.sh           # offline, ~15 min: every part on small single-operator jobs -> must end with TEST PASSED
 tmux new -s wayang  # so the run survives closing VS Code / the laptop
-./collect.sh start --until "2026-11-15 08:00"     # Ctrl+B then D to detach; it runs until then
+./collect.sh start  # Ctrl+B then D to detach; the dataset is complete by Sunday 2026-11-15 16:00
 ```
 
 Back later: `ssh USER@SERVER`, then `tmux attach -t wayang` (live), `./collect.sh status`, or
@@ -55,12 +55,34 @@ far longer than 3 days can finish, so the run is limited only by time, and the f
 sample of the whole space (no corner left out). Each config: 2 warm-up + 5 measured pairs of operator plan vs
 baseline plan, Wayang's cost estimate stored next to each.
 
-**Why lanes do not spoil the measurements.** Each lane has its own CPUs, so lanes never take CPU time from each
-other; CPU time (the main cost signal) is per thread/process and unaffected. What lanes do share is the memory bus
-and the last-level cache, which can stretch wall time of memory-heavy operators by a few percent. Every row records
-its lane (`tag` = `lane-java-2` etc.), so a model or a check can compare lanes. On a server that other people use
-too, their jobs disturb any measurement more than the lanes do: `collect.log` records the load and other users' busy
-processes every 10 minutes.
+**What lanes do and do not isolate.** Each lane has its own CPUs (`taskset`), so lanes never take CPU *time slots*
+from each other. They still share the last-level cache, memory bandwidth, the disk and the file cache, and the CPU
+package's power budget (the all-core clock). Cache and memory stalls count as CPU time, so lanes can raise CPU time as
+well as wall time, most for memory-heavy operators. This is handled, not assumed away:
+
+- **Calibration** (`data/calibration.txt` / `.csv`): before the lanes start, the first configs of the first Java and
+  Spark lane are measured *alone* on that lane's CPUs; the lane then measures the same configs first, on the same CPUs,
+  with all lanes running. The ratio (under load / alone) per metric is the number to report next to results from
+  lane data (`calibration_report.py`).
+- **Intruders on a lane's CPUs**: every row records the busy time of its lane's CPUs (`os_lane_busy_ns`); analyze.py
+  turns it into `lane_foreign_cpu_cores` and flags runs where anything else used > 0.25 cores there (`quiet_ok = 0`;
+  such pairs are left out of `operator_costs.csv` and of training).
+- **Housekeeping CPUs** (one physical core by default, `plan_lanes.py --housekeeping`): `collect.sh` itself, the merges
+  every 3 h and the status run there, never on a lane's CPUs.
+- **Energy** is not recorded while lanes run: RAPL counts the whole package, i.e. every lane at once.
+- Not covered: the disk and file cache. `--ephemeral-inputs` regenerates each input file per config, which can push
+  another lane's input out of the file cache (watch `os_disk_read_bytes`).
+
+Every row records its lane (`tag` = `lane-java-2` etc.). On a server that other people use too, their jobs show up
+as `quiet_ok = 0` on the lanes they touch; `collect.log` also lists other users' busy processes every 10 minutes.
+Outside `collect.sh`, the runners measure **one config at a time per machine** (a lock in
+`../common/measure-gate.sh`), so two runs started by hand take turns instead of disturbing each other.
+
+**The time limit** is when the final dataset must be ready: by default Sunday 2026-11-15 16:00 (server clock; another
+time with `--until "YYYY-MM-DD HH:MM"`). New configs stop 50 min before it, configs still running 30 min before it are
+stopped, then the final merge and export run. Everything finished until then is kept: each config is written to disk
+the moment it ends, and the dataset is exported every 3 h along the way. A lane that finishes its list early gets a
+fresh random batch (new seed; configs it already ran are skipped), so no lane sits idle.
 
 **For days without attention:** a lane whose runner crashes is restarted after 1 minute (it gives up after 10
 failures in a row; the other lanes go on); a config that hangs is killed after 30 minutes; a cut CSV line is

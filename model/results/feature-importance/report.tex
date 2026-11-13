@@ -1,0 +1,260 @@
+\documentclass[11pt,a4paper]{article}
+\usepackage[margin=2.2cm]{geometry}
+\usepackage{amsmath,booktabs,wasysym,array,xcolor,url,hyperref}
+\usepackage[T1]{fontenc}\usepackage{lmodern}
+\providecommand{\high}{\CIRCLE}\providecommand{\some}{\LEFTcircle}\providecommand{\low}{\Circle}
+\newcommand{\hl}[1]{\textbf{#1}}
+\setlength{\parindent}{0pt}\setlength{\parskip}{0.55em}
+\title{Which resources and inputs does a cost model for Apache Wayang operators need?\\[2pt]\large A measurement-based analysis for the Java, Spark and PostgreSQL platforms}
+\author{}\date{}
+\begin{document}\maketitle
+\section{Summary}
+
+A cost model for a Wayang operator predicts how much of each resource the operator uses: CPU time, memory, garbage collection (GC), disk I/O, data moved between processes or machines, and a fixed overhead per job. Every extra resource is another prediction target and another source of error, so we measured which ones actually matter. For each platform and operator we ran the operator inside a plan and subtracted the same plan without it, so every number below is what the operator itself adds. A resource is \hl{needed} when it is clearly above measurement noise and large relative to the operator's total cost; it is \hl{not needed} when it is negligible for every operator of the platform.
+
+\textbf{Java}\vspace{-0.3em}\begin{itemize}\itemsep0pt
+\item \hl{Needed:} CPU (FlatMap, ReduceBy, GroupBy, Sort, Join, Cartesian, TextFileSink); disk I/O (TextFileSink).
+\item Only in some configurations: fixed per-job overhead (TextFileSink).
+\item \hl{Not needed} (negligible for every operator): garbage collection.
+\item \emph{Not assessed in this data} (not measured): memory.
+\item Operators whose own cost is below measurement noise: Map, Filter, GlobalReduce, Count, UnionAll (a constant or a per-row cost from the source/sink is enough).
+\end{itemize}
+
+\textbf{Spark (single node)}\vspace{-0.3em}\begin{itemize}\itemsep0pt
+\item \hl{Needed:} CPU (Map, FlatMap, ReduceBy, GroupBy, Distinct, Sort, Join, Cartesian); memory (GroupBy, Sort, Join); disk I/O (TextFileSink); data movement (GroupBy, Sort, Join); fixed per-job overhead (ReduceBy, Distinct, Sort, TextFileSink).
+\item \hl{Not needed} (negligible for every operator): garbage collection.
+\item Operators whose own cost is below measurement noise: Filter, Count, UnionAll (a constant or a per-row cost from the source/sink is enough).
+\end{itemize}
+
+\textbf{Pending:} Spark (cluster), PostgreSQL are not in the data used for this version of the report.
+\section{Method}
+
+\textbf{Measurement.} Each configuration (operator, input size, number of distinct keys, row width, selectivity, JVM and platform settings) runs in a fresh JVM. It executes two plans alternately after warm-up runs: a \emph{baseline} (source $\to$ parse $\to$ sink) and the \emph{operator plan} (the same with the operator inserted). The operator's cost is the difference of the two runs of a pair, in every metric; a configuration has 3--7 pairs. Metrics are read from the JVM and the operating system over the window from the first record to the end of the job, so Wayang's own optimisation is excluded. Pairs with a run measured at a reduced CPU clock or next to other busy processes are flagged by the profiler and left out here.
+
+\textbf{Resources and the columns they come from.}
+\begin{center}\small\begin{tabular}{@{}llp{9.2cm}@{}}\toprule
+
+Platform & Resource & Measured column\\\midrule
+
+Java & CPU & thread\_cpu\_exec\_ns\\
+ & Memory & mem\_held\_bytes\\
+ & GC & gc\_time\_exec\_ms\\
+ & Disk I/O & os\_disk\_read/write\_bytes\\
+\midrule
+
+Spark (single node) & CPU & task\_cpu\_ns\\
+ & Memory & task\_peak\_execution\_memory\_bytes\_max $\times$ task\_slots\\
+ & GC & task\_gc\_ms\\
+ & Disk I/O & spill\_disk\_bytes + output\_bytes + os\_disk\_read\_bytes\\
+ & Data movement & shuffle\_write\_bytes\\
+\midrule
+\bottomrule\end{tabular}\end{center}
+
+The \emph{fixed overhead} is not a column: runtime is fitted as $\text{fixed} + \text{per-unit}\times(\text{input rows}+\text{output rows})$ through the medians of the smallest and the largest 20\% of the configurations of the operator, and the fixed part is compared with the median added runtime.
+
+\textbf{Rating.} For every resource and operator we compute (i) the \emph{signal}: the share of configurations whose median added amount is above the spread between pairs (IQR) and above a floor (1\,ms, 64\,KiB), and (ii) the \emph{magnitude} in the median configuration: for CPU and GC the share of the operator's added runtime (CPU time $/$ (wall time $\times$ threads)); for memory, disk and data movement bytes per input byte; for the fixed overhead its share of the median added runtime. \high~\emph{important}: signal $\geq$ 50\% and magnitude $\geq$ 0.30 (time) or 0.50 (bytes); \some~\emph{sometimes}: signal $\geq$ 20\% and magnitude $\geq$ 0.05, or the 90th percentile $\geq$ the important threshold; \low~\emph{negligible}: otherwise. A superscript $-$ means the operator \emph{reduces} the resource compared to its baseline (e.g.\ a filter sends fewer rows onward). A dot means the operator's added runtime is below noise in more than 80\% of its configurations, so no rating is meaningful.
+
+\textbf{Input properties.} For every operator we compute the Spearman rank correlation $\rho$ between its added runtime and each property of the configuration (input rows, output rows, distinct keys, row width, selectivity, left$\times$right rows for binary operators). $|\rho|\geq 0.6$ counts as \emph{needed}, $0.3\leq|\rho|<0.6$ as \emph{weak}, below as \emph{not needed}.
+\subsection*{Data used}
+\begin{center}\small\begin{tabular}{lrrr}\toprule Platform & Configurations & Clean pairs & Disturbed pairs left out\\\midrule
+
+Java & 234 & 702 & 63\\
+
+Spark (single node) & 210 & 630 & 165\\
+\bottomrule\end{tabular}\end{center}
+
+Source files: \path{../java-profiler/results-2026-11-02/pairs.csv}, \path{../spark-profiler/results/pairs.csv}.
+\section{Results by platform}
+\subsection{Java}
+\begin{center}\small\begin{tabular}{lcccccc}\toprule
+
+Operator & CPU & Memory & GC & Disk I/O & Data movement & Fixed overhead\\\midrule
+
+Map & $\cdot$ & $\cdot$ & $\cdot$ & $\cdot$ & -- & $\cdot$\\
+
+Filter & $\cdot$ & $\cdot$ & $\cdot$ & $\cdot$ & -- & $\cdot$\\
+
+FlatMap & \high & -- & \low & \low & -- & \low\\
+
+ReduceBy & \high & -- & \low & \low & -- & \low\\
+
+GroupBy & \high & -- & \low & \low & -- & \low\\
+
+GlobalReduce & $\cdot$ & $\cdot$ & $\cdot$ & $\cdot$ & -- & $\cdot$\\
+
+Count & $\cdot$ & $\cdot$ & $\cdot$ & $\cdot$ & -- & $\cdot$\\
+
+Distinct & \some & -- & \low & \low & -- & \low\\
+
+Sort & \high & -- & \low & \low & -- & \low\\
+
+Join & \high & -- & \low & \low & -- & \low\\
+
+UnionAll & $\cdot$ & $\cdot$ & $\cdot$ & $\cdot$ & -- & $\cdot$\\
+
+Cartesian & \high & -- & \low & \low & -- & \low\\
+
+TextFileSink & \high & -- & \low & \high & -- & \some\\
+\bottomrule\end{tabular}\end{center}
+
+\textbf{Magnitudes} (median configuration; CPU, GC and fixed overhead: share of added runtime, memory, disk, data movement: bytes per input byte).
+\begin{center}\footnotesize\begin{tabular}{lrrrrrrr}\toprule
+
+Operator & Configs & CPU & Memory & GC & Disk I/O & Data movement & Fixed overhead\\\midrule
+
+Map & 10 & \multicolumn{6}{c}{\emph{cost below noise}}\\
+
+Filter & 50 & \multicolumn{6}{c}{\emph{cost below noise}}\\
+
+FlatMap & 30 & 1.00 & -- & 0.00 & 0.00 & -- & 0.02\\
+
+ReduceBy & 26 & 0.99 & -- & 0.00 & 0.00 & -- & --\\
+
+GroupBy & 23 & 1.00 & -- & 0.00 & 0.00 & -- & 0.00\\
+
+GlobalReduce & 9 & \multicolumn{6}{c}{\emph{cost below noise}}\\
+
+Count & 10 & \multicolumn{6}{c}{\emph{cost below noise}}\\
+
+Distinct & 26 & 1.00 & -- & 0.00 & 0.00 & -- & 0.00\\
+
+Sort & 6 & 1.00 & -- & 0.00 & 0.00 & -- & 0.10\\
+
+Join & 12 & 1.00 & -- & 0.00 & 0.00 & -- & 0.00\\
+
+UnionAll & 10 & \multicolumn{6}{c}{\emph{cost below noise}}\\
+
+Cartesian & 12 & 1.00 & -- & 0.00 & 0.00 & -- & 0.05\\
+
+TextFileSink & 10 & 1.00 & -- & 0.00 & 1.00 & -- & 0.12\\
+\bottomrule\end{tabular}\end{center}
+
+A dash means not applicable or not measured. ``Configs'' is the number of configurations (each with 3--7 pairs) behind the operator's row: ratings from a handful of configurations are weak evidence.
+
+\textbf{Input properties} (Spearman $\rho$ with the operator's added runtime; bold: needed; a dash: not applicable, constant in the data, or fewer than 8 configurations).
+\begin{center}\footnotesize\begin{tabular}{lrrrrrr}\toprule
+
+Operator & input rows & output rows & distinct keys & row width & selectivity & left$\times$right rows\\\midrule
+
+FlatMap & \hl{+0.69} & \hl{+0.96} & -- & \hl{+0.85} & -- & --\\
+
+ReduceBy & +0.31 & \hl{+0.92} & \hl{+0.90} & \hl{+0.85} & -- & --\\
+
+GroupBy & \hl{+0.93} & +0.50 & +0.48 & \hl{+0.76} & -- & --\\
+
+Distinct & \hl{+0.61} & \hl{+0.80} & \hl{+0.78} & \hl{+0.90} & -- & --\\
+
+Sort & -- & -- & -- & -- & -- & --\\
+
+Join & \hl{+0.86} & \hl{+0.98} & +0.42 & \hl{+0.69} & -- & \hl{+0.86}\\
+
+Cartesian & \hl{+0.93} & \hl{+0.96} & -- & +0.37 & -- & \hl{+0.96}\\
+
+TextFileSink & \hl{+0.98} & \hl{+0.98} & -- & \hl{+0.98} & -- & --\\
+\bottomrule\end{tabular}\end{center}
+\subsection{Spark (single node)}
+\begin{center}\small\begin{tabular}{lcccccc}\toprule
+
+Operator & CPU & Memory & GC & Disk I/O & Data movement & Fixed overhead\\\midrule
+
+Map & \high & \low & \low & \low & \low & \low\\
+
+Filter & $\cdot$ & $\cdot$ & $\cdot$ & $\cdot$ & $\cdot$ & $\cdot$\\
+
+FlatMap & \high & \low & \low & \low & \low & \low\\
+
+ReduceBy & \high & \some & \low & \low & \low & \high\\
+
+GroupBy & \high & \high & \low & \low & \high & \some\\
+
+GlobalReduce & \some & \low & \low & \low & \low & \low\\
+
+Count & $\cdot$ & $\cdot$ & $\cdot$ & $\cdot$ & $\cdot$ & $\cdot$\\
+
+Distinct & \high & \some & \low & \low & \low & \high\\
+
+Sort & \high & \high & \low & \low & \high & \high\\
+
+Join & \high & \high & \low & \low & \high & \some\\
+
+UnionAll & $\cdot$ & $\cdot$ & $\cdot$ & $\cdot$ & $\cdot$ & $\cdot$\\
+
+Cartesian & \high & \low & \low & \low & \low & \some\\
+
+TextFileSink & \some & \low & \low & \high & \low & \high\\
+\bottomrule\end{tabular}\end{center}
+
+\textbf{Magnitudes} (median configuration; CPU, GC and fixed overhead: share of added runtime, memory, disk, data movement: bytes per input byte).
+\begin{center}\footnotesize\begin{tabular}{lrrrrrrr}\toprule
+
+Operator & Configs & CPU & Memory & GC & Disk I/O & Data movement & Fixed overhead\\\midrule
+
+Map & 10 & 0.41 & 0.00 & 0.00 & 0.00 & 0.00 & --\\
+
+Filter & 50 & \multicolumn{6}{c}{\emph{cost below noise}}\\
+
+FlatMap & 30 & 0.50 & 0.00 & 0.00 & 0.00 & 0.00 & 0.03\\
+
+ReduceBy & 26 & 0.34 & 0.07 & 0.00 & 0.00 & 0.01 & 0.57\\
+
+GroupBy & 26 & 0.59 & 1.15 & 0.00 & 0.00 & 0.82 & 0.24\\
+
+GlobalReduce & 10 & 0.19 & 0.00 & 0.00 & 0.00 & 0.00 & --\\
+
+Count & 7 & \multicolumn{6}{c}{\emph{cost below noise}}\\
+
+Distinct & 13 & 0.51 & 0.03 & 0.00 & 0.00 & 0.01 & 0.61\\
+
+Sort & 5 & 0.63 & 1.52 & 0.00 & 0.00 & 0.85 & 0.38\\
+
+Join & 10 & 0.89 & 1.12 & 0.00 & 0.00 & 0.83 & 0.20\\
+
+UnionAll & 6 & \multicolumn{6}{c}{\emph{cost below noise}}\\
+
+Cartesian & 12 & 0.64 & 0.00 & 0.00 & 0.00 & 0.00 & 0.23\\
+
+TextFileSink & 5 & 0.28 & 0.00 & 0.00 & 1.01 & 0.00 & 0.51\\
+\bottomrule\end{tabular}\end{center}
+
+A dash means not applicable or not measured. ``Configs'' is the number of configurations (each with 3--7 pairs) behind the operator's row: ratings from a handful of configurations are weak evidence.
+
+\textbf{Input properties} (Spearman $\rho$ with the operator's added runtime; bold: needed; a dash: not applicable, constant in the data, or fewer than 8 configurations).
+\begin{center}\footnotesize\begin{tabular}{lrrrrrr}\toprule
+
+Operator & input rows & output rows & distinct keys & row width & selectivity & left$\times$right rows\\\midrule
+
+Map & \hl{+0.79} & \hl{+0.79} & -- & \hl{+0.79} & -- & --\\
+
+FlatMap & \hl{+0.78} & \hl{+0.97} & -- & \hl{+0.79} & -- & --\\
+
+ReduceBy & \hl{+0.60} & \hl{+0.88} & \hl{+0.88} & \hl{+0.97} & -- & --\\
+
+GroupBy & \hl{+0.95} & +0.43 & +0.40 & \hl{+0.73} & -- & --\\
+
+GlobalReduce & \hl{+0.62} & -- & -- & \hl{+0.62} & -- & --\\
+
+Distinct & \hl{+0.61} & \hl{+0.86} & \hl{+0.85} & \hl{+0.95} & -- & --\\
+
+Sort & -- & -- & -- & -- & -- & --\\
+
+Join & \hl{+0.98} & \hl{+0.90} & \hl{+0.77} & \hl{+0.90} & -- & \hl{+0.98}\\
+
+Cartesian & \hl{+0.96} & \hl{+0.80} & -- & \hl{+0.65} & -- & \hl{+0.80}\\
+
+TextFileSink & -- & -- & -- & -- & -- & --\\
+\bottomrule\end{tabular}\end{center}
+\section{What this means for the cost model}
+\begin{itemize}\itemsep2pt
+\item \textbf{Java.} Predict CPU, disk I/O. Garbage collection can be left out or kept as a constant. A per-job fixed cost matters for TextFileSink.
+\item \textbf{Spark (single node).} Predict CPU, memory, disk I/O, data movement, fixed per-job overhead. Garbage collection can be left out or kept as a constant. A per-job fixed cost matters for ReduceBy, GroupBy, Distinct, Sort, Join, Cartesian, TextFileSink.
+\item \textbf{Inputs.} Use the properties marked needed in the matrices above per operator; properties with $|\rho|<0.3$ for an operator carry no usable signal for it. Output rows is often the strongest driver of filtering and grouping operators, but is unknown before execution: the model should receive Wayang's cardinality estimate for it.
+\end{itemize}
+\section{Limitations}
+\begin{itemize}\itemsep2pt
+\item On the Java platform an operator runs on one thread, so its CPU time equals its runtime: CPU is then the resource by construction, and the other resources decide only what \emph{else} must be predicted.
+\item Ratings describe the configurations that were measured (inputs of $10^3$--$3\cdot10^6$ rows, synthetic data with one row layout); a resource rated negligible here can matter for much larger inputs.
+\item An operator whose cost is below noise in most configurations is not ``unimportant'': it is cheap next to reading and parsing its input. Its cost can still add up in long pipelines.
+\item Data movement for Spark on a single node is the shuffle volume written; only a cluster measures real network traffic between executors.
+\item Energy and hardware counters (cycles, instructions) exist on macOS only and are not part of this analysis.
+\end{itemize}
+\end{document}

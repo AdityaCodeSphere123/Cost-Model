@@ -1,0 +1,27 @@
+platform,operator,configs,configs_wall_signal,cpu_rating,cpu_median,cpu_p90,cpu_signal,cpu_sign,cpu_drivers,mem_rating,mem_median,mem_p90,mem_signal,mem_sign,mem_drivers,gc_rating,gc_median,gc_p90,gc_signal,gc_sign,gc_drivers,disk_rating,disk_median,disk_p90,disk_signal,disk_sign,disk_drivers,move_rating,move_median,move_p90,move_signal,move_sign,move_drivers,fixed_rating,fixed_median,fixed_p90,fixed_signal,fixed_sign,fixed_drivers,runtime_drivers,measurable
+java,map,10,0,n/a,,,0.20,-1,,n/a,,,,1,,n/a,,,0.00,1,,negligible,0,0,0.00,1,,n/a,,,,1,,negligible,,,,1,,"row width, output rows",0.00
+java,filter,50,5,negligible,1,1,0.14,1,,n/a,,,,1,,negligible,0,0,0.00,1,,negligible,0,0,0.00,1,,n/a,,,,1,,negligible,,,,1,,,0.10
+java,flatmap,30,27,important,0.9989,1,0.90,1,"output rows, row width",n/a,,,,1,,negligible,0,0.002106,0.00,1,,negligible,0,0,0.00,1,,n/a,,,,1,,negligible,0.02293,,0.83,1,,"output rows, row width",0.90
+java,reduceby,26,12,important,0.9923,1,0.54,1,"output rows, distinct keys",n/a,,,,1,,negligible,0,0.08911,0.04,1,,negligible,0,0,0.00,1,,n/a,,,,1,,negligible,,,,1,,"output rows, distinct keys",0.46
+java,groupby,23,16,important,0.9978,1,0.70,1,"input rows, row width",n/a,,,,1,,negligible,0,0.2332,0.13,1,,negligible,0,0,0.00,1,,n/a,,,,1,,negligible,0,,0.00,1,,"input rows, row width",0.70
+java,globalreduce,9,0,n/a,,,0.11,-1,,n/a,,,,1,,n/a,,,0.00,1,,negligible,0,0,0.00,1,,n/a,,,,1,,negligible,,,,1,,,0.00
+java,count,10,0,n/a,,,0.10,-1,,n/a,,,,1,,n/a,,,0.00,1,,negligible,0,0,0.00,1,,n/a,,,,1,,negligible,,,,1,,"row width, input rows",0.00
+java,distinct,26,13,sometimes,0.9991,1,0.46,1,,n/a,,,,1,,negligible,0,0,0.04,1,,negligible,0,0,0.00,1,,n/a,,,,1,,negligible,0,,0.20,1,,"row width, output rows",0.50
+java,sort,6,6,important,1,1,1.00,1,,n/a,,,,1,,negligible,0,0,0.00,1,,negligible,0,0,0.00,1,,n/a,,,,1,,negligible,0.09512,,1.00,1,,,1.00
+java,join,12,12,important,0.9985,0.9998,1.00,1,"output rows, left x right rows",n/a,,,,1,,negligible,0,0.2342,0.25,1,,negligible,0,0,0.00,1,,n/a,,,,1,,negligible,0,,1.00,1,,"output rows, left x right rows",1.00
+java,union,10,0,n/a,,,0.10,-1,,n/a,,,,1,,n/a,,,0.00,1,,negligible,0,0,0.00,1,,n/a,,,,1,,negligible,,,,1,,"row width, output rows",0.00
+java,cartesian,12,10,important,1,1,0.83,1,"output rows, left x right rows",n/a,,,,1,,negligible,0,0,0.00,1,,negligible,0,0,0.00,1,,n/a,,,,1,,negligible,0.05222,,0.33,1,,"output rows, left x right rows",0.83
+java,textsink,10,10,important,0.996,1,1.00,1,"row width, output rows",n/a,,,,1,,negligible,0,0,0.00,1,,important,1,1.004,1.00,1,"row width, output rows",n/a,,,,1,,sometimes,0.1188,,1.00,1,,"row width, output rows",1.00
+spark,map,10,4,important,0.4107,0.6593,0.50,1,"row width, output rows",negligible,0,0,0.00,1,,negligible,0,0,0.00,1,,negligible,0,0,0.00,1,,negligible,0,0,0.00,1,,negligible,,,,1,,"row width, output rows",0.40
+spark,filter,50,3,sometimes,0.4188,0.5318,0.26,-1,,negligible,0,0,0.00,1,,negligible,0,0,0.00,1,,negligible,0,0,0.00,1,,negligible,0,0,0.00,1,,negligible,,,,1,,,0.06
+spark,flatmap,30,26,important,0.4951,0.5939,0.90,1,"output rows, input rows",negligible,0,0,0.00,1,,negligible,0,0,0.07,1,,negligible,0,0,0.00,1,,negligible,0,0,0.00,1,,negligible,0.03272,,0.33,1,,"output rows, row width",0.87
+spark,reduceby,26,26,important,0.3424,0.5799,1.00,1,"row width, output rows",sometimes,0.06935,3.247,0.62,1,,negligible,0,0,0.08,1,,negligible,0,0,0.00,1,,negligible,0.007705,0.4322,0.62,1,,important,0.5704,,1.00,1,,"row width, output rows",1.00
+spark,groupby,26,26,important,0.5919,0.746,1.00,1,"input rows, row width",important,1.145,2.449,1.00,1,input rows,negligible,0,0,0.00,1,,negligible,0,0,0.00,1,,important,0.8213,0.8383,1.00,1,"input rows, row width",sometimes,0.2384,,1.00,1,,"input rows, row width",1.00
+spark,globalreduce,10,2,sometimes,0.1902,0.2029,0.50,1,,negligible,0,0,0.00,1,,negligible,0,0,0.00,1,,negligible,0,0,0.00,1,,negligible,0,0,0.00,1,,negligible,,,,1,,"row width, input rows",0.20
+spark,count,7,0,n/a,,,0.14,1,,negligible,0,0,0.00,1,,n/a,,,0.00,1,,negligible,0,0,0.00,1,,negligible,0,0,0.00,1,,negligible,,,,1,,,0.00
+spark,distinct,13,13,important,0.5067,0.6064,1.00,1,"row width, output rows",sometimes,0.03457,2.207,0.62,1,,negligible,0,0.03132,0.15,1,,negligible,0,0,0.00,1,,negligible,0.005937,0.355,0.62,1,,important,0.6084,,1.00,1,,"row width, output rows",1.00
+spark,sort,5,5,important,0.6322,0.6966,1.00,1,,important,1.525,1.545,1.00,1,,negligible,0,0,0.00,1,,negligible,0,0.0003343,0.00,1,,important,0.8478,0.864,1.00,1,,important,0.3847,,1.00,1,,,1.00
+spark,join,10,10,important,0.8867,0.9433,1.00,1,"left x right rows, input rows",important,1.123,1.348,1.00,1,"left x right rows, input rows",negligible,0,0.06398,0.20,1,,negligible,0,0.0009498,0.10,1,,important,0.8289,0.8448,1.00,1,"left x right rows, input rows",sometimes,0.2029,,1.00,1,,"left x right rows, input rows",1.00
+spark,union,6,0,n/a,,,0.33,1,,negligible,0,0,0.00,1,,n/a,,,0.00,1,,negligible,0,0,0.00,1,,negligible,0,0,0.00,1,,negligible,,,,1,,,0.00
+spark,cartesian,12,12,important,0.6409,0.9789,1.00,1,"input rows, output rows",negligible,0,0,0.00,1,,negligible,0.002328,0.01947,0.50,1,,negligible,0,0,0.00,1,,negligible,0,0,0.00,1,,sometimes,0.2263,,1.00,1,,"input rows, output rows",1.00
+spark,textsink,5,5,sometimes,0.2766,0.4777,1.00,1,,negligible,0,0,0.00,1,,negligible,0,0,0.00,1,,important,1.008,1.008,1.00,1,,negligible,0,0,0.00,1,,important,0.5112,,1.00,1,,,1.00

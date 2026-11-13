@@ -94,7 +94,7 @@ def platform_of(r):
 def resource_values(r, p):
     if p == "java":
         return {"cpu": num(r.get("thread_cpu_exec_ns")),
-                "mem": first(r, "mem_held_bytes", "live_heap_after_gc_max_bytes"),
+                "mem": num(r.get("mem_held_bytes")),  # only the memory probe: older rows have none = not measured
                 "gc": None if first(r, "gc_time_exec_ms", "gc_time_ms") is None else first(r, "gc_time_exec_ms", "gc_time_ms") * 1e6,
                 "disk": total(r, "os_disk_read_bytes", "os_disk_write_bytes"),
                 "move": None}
@@ -110,7 +110,7 @@ def resource_values(r, p):
     if p == "postgres":
         temp = num(r.get("db_temp_written_blocks"))
         return {"cpu": num(r.get("db_cpu_ns")),
-                "mem": first(r, "mem_held_bytes", "live_heap_after_gc_max_bytes"),  # Java side: rows received
+                "mem": num(r.get("mem_held_bytes")),  # Java side: rows received (only the memory probe)
                 "gc": None if first(r, "gc_time_exec_ms", "gc_time_ms") is None else first(r, "gc_time_exec_ms", "gc_time_ms") * 1e6,
                 "disk": total(r, "db_disk_read_bytes", "db_disk_write_bytes") if temp is None
                 else (total(r, "db_disk_read_bytes", "db_disk_write_bytes") or 0) + temp * 8192,
@@ -298,8 +298,10 @@ def analyse(data):
                 rec[k] = dict(rating=rating, median=med, p90=p90, signal=sig, sign=sign, drivers=drivers)
             # Runtime drivers
             cand = []
+            rec["rho"] = {}
             for fname in cfgs[0]["features"]:
                 rho = spearman([c["features"].get(fname) for c in cfgs], [c["wall"] for c in cfgs])
+                rec["rho"][fname] = rho
                 if rho is not None and abs(rho) >= DRIVER_RHO:
                     cand.append((abs(rho), fname))
             rec["runtime_drivers"] = ", ".join(f for _, f in sorted(cand, reverse=True)[:2])
@@ -400,10 +402,248 @@ def write_csv(rows, path):
             w.writerow(d)
 
 
+# ------------------------------------------------------------------------------------------
+# The report: a stand-alone LaTeX document (python3 feature_importance.py DATA... --report)
+# ------------------------------------------------------------------------------------------
+FEATURES = ["input rows", "output rows", "distinct keys", "row width", "selectivity", "left x right rows"]
+FEATURE_TEX = {"input rows": "input rows", "output rows": "output rows", "distinct keys": "distinct keys",
+               "row width": "row width", "selectivity": "selectivity", "left x right rows": "left$\\times$right rows"}
+RES_TEX = {"cpu": "CPU", "mem": "memory", "gc": "garbage collection", "disk": "disk I/O",
+           "move": "data movement", "fixed": "fixed per-job overhead"}
+SOURCES_TABLE = {
+    "java": {"cpu": "thread\\_cpu\\_exec\\_ns", "mem": "mem\\_held\\_bytes", "gc": "gc\\_time\\_exec\\_ms",
+             "disk": "os\\_disk\\_read/write\\_bytes", "move": "--"},
+    "spark": {"cpu": "task\\_cpu\\_ns", "mem": "task\\_peak\\_execution\\_memory\\_bytes\\_max $\\times$ task\\_slots",
+              "gc": "task\\_gc\\_ms", "disk": "spill\\_disk\\_bytes + output\\_bytes + os\\_disk\\_read\\_bytes",
+              "move": "shuffle\\_write\\_bytes"},
+    "spark-cluster": {"cpu": "task\\_cpu\\_ns", "mem": "task\\_peak\\_execution\\_memory\\_bytes\\_max $\\times$ task\\_slots",
+                      "gc": "task\\_gc\\_ms", "disk": "spill\\_disk\\_bytes + output\\_bytes + os\\_disk\\_read\\_bytes",
+                      "move": "network\\_bytes (shuffle read from another executor)"},
+    "postgres": {"cpu": "db\\_cpu\\_ns (database server processes)", "mem": "mem\\_held\\_bytes (Java side)",
+                 "gc": "gc\\_time\\_exec\\_ms (Java side)",
+                 "disk": "db\\_disk\\_read/write\\_bytes + 8\\,KiB $\\times$ db\\_temp\\_written\\_blocks",
+                 "move": "network\\_bytes\\_in (result rows PostgreSQL$\\to$Java)"},
+}
+
+
+def tex_escape(t):
+    return t.replace("_", "\\_").replace("%", "\\%").replace("&", "\\&")
+
+
+def ops_list(rows, pred):
+    return ", ".join(OP_LABEL.get(r["operator"], r["operator"]) for r in rows if pred(r))
+
+
+def platform_summary(prs, p, stat):
+    """Plain-language verdict for one platform, computed from the ratings: (needed, some, dropped, unmeasured, cheap)."""
+    live = [r for r in prs if not cheap(r)]
+    needed, some, dropped, unmeasured = [], [], [], []
+    for k in RESOURCES:
+        if APPLICABLE.get(p, {}).get(k) is False:
+            continue
+        rs = [r for r in live if r[k]["rating"] != "na"]
+        if not rs:
+            unmeasured.append(k)
+            continue
+        high = [r for r in rs if r[k]["rating"] == "high"]
+        mid = [r for r in rs if r[k]["rating"] == "some"]
+        if high:
+            needed.append((k, high))
+        elif mid:
+            some.append((k, mid))
+        else:
+            dropped.append(k)
+    return needed, some, dropped, unmeasured, [r for r in prs if cheap(r)]
+
+
+def report_tex(rows, data, dropped_pairs, sources):
+    L = []
+
+    def w(t):  # prose and bold run-in headings start a new paragraph; LaTeX commands go on as they are
+        L.append(("\n" + t) if (t[:1].isalpha() or t.startswith("\\textbf{") or t.startswith("\\hl{")) else t)
+
+    plats = [p for p in PLATFORMS if p in data]
+    missing = [PLATFORM_LABEL[p] for p in PLATFORMS if p not in data]
+    stats = {}
+    for p in plats:
+        cfg = sum(len(v) for v in data[p].values())
+        prs = sum(len(c) for v in data[p].values() for c in v.values())
+        stats[p] = dict(configs=cfg, pairs=prs, disturbed=dropped_pairs.get(p, 0))
+    w(r"\documentclass[11pt,a4paper]{article}")
+    w(r"\usepackage[margin=2.2cm]{geometry}")
+    w(r"\usepackage{amsmath,booktabs,wasysym,array,xcolor,url,hyperref}")
+    w(r"\usepackage[T1]{fontenc}\usepackage{lmodern}")
+    w(r"\providecommand{\high}{\CIRCLE}\providecommand{\some}{\LEFTcircle}\providecommand{\low}{\Circle}")
+    w(r"\newcommand{\hl}[1]{\textbf{#1}}")
+    w(r"\setlength{\parindent}{0pt}\setlength{\parskip}{0.55em}")
+    w(r"\title{Which resources and inputs does a cost model for Apache Wayang operators need?\\[2pt]"
+      r"\large A measurement-based analysis for the Java, Spark and PostgreSQL platforms}")
+    w(r"\author{}\date{}")
+    w(r"\begin{document}\maketitle")
+    # ---- summary
+    w(r"\section{Summary}")
+    w(r"A cost model for a Wayang operator predicts how much of each resource the operator uses: CPU time, memory, "
+      r"garbage collection (GC), disk I/O, data moved between processes or machines, and a fixed overhead per job. "
+      r"Every extra resource is another prediction target and another source of error, so we measured which ones "
+      r"actually matter. For each platform and operator we ran the operator inside a plan and subtracted the same "
+      r"plan without it, so every number below is what the operator itself adds. A resource is \hl{needed} when "
+      r"it is clearly above measurement noise and large relative to the operator's total cost; it is \hl{not needed} "
+      r"when it is negligible for every operator of the platform.")
+    for p in plats:
+        prs = [r for r in rows if r["platform"] == p]
+        needed, some, dropped, unmeasured, cheap_ops = platform_summary(prs, p, stats[p])
+        w(r"\textbf{" + PLATFORM_LABEL[p] + r"}\vspace{-0.3em}\begin{itemize}\itemsep0pt")
+        if needed:
+            w(r"\item \hl{Needed:} " + "; ".join(f"{RES_TEX[k]} ({', '.join(OP_LABEL.get(r['operator'], r['operator']) for r in rs)})"
+                                              for k, rs in needed) + ".")
+        if some:
+            w(r"\item Only in some configurations: " + "; ".join(
+                f"{RES_TEX[k]} ({', '.join(OP_LABEL.get(r['operator'], r['operator']) for r in rs)})" for k, rs in some) + ".")
+        if dropped:
+            w(r"\item \hl{Not needed} (negligible for every operator): " + ", ".join(RES_TEX[k] for k in dropped) + ".")
+        if unmeasured:
+            w(r"\item \emph{Not assessed in this data} (not measured): " + ", ".join(RES_TEX[k] for k in unmeasured) + ".")
+        if cheap_ops:
+            w(r"\item Operators whose own cost is below measurement noise: "
+              + ", ".join(OP_LABEL.get(r["operator"], r["operator"]) for r in cheap_ops)
+              + r" (a constant or a per-row cost from the source/sink is enough).")
+        w(r"\end{itemize}")
+    if missing:
+        w(r"\textbf{Pending:} " + ", ".join(missing) + r" are not in the data used for this version of the report.")
+    # ---- method
+    w(r"\section{Method}")
+    w(r"\textbf{Measurement.} Each configuration (operator, input size, number of distinct keys, row width, "
+      r"selectivity, JVM and platform settings) runs in a fresh JVM. It executes two plans alternately after warm-up "
+      r"runs: a \emph{baseline} (source $\to$ parse $\to$ sink) and the \emph{operator plan} (the same with the "
+      r"operator inserted). The operator's cost is the difference of the two runs of a pair, in every metric; a "
+      r"configuration has 3--7 pairs. Metrics are read from the JVM and the operating system over the window from "
+      r"the first record to the end of the job, so Wayang's own optimisation is excluded. Pairs with a run "
+      r"measured at a reduced CPU clock or next to other busy processes are flagged by the profiler and left out here.")
+    w(r"\textbf{Resources and the columns they come from.}")
+    w(r"\begin{center}\small\begin{tabular}{@{}llp{9.2cm}@{}}\toprule")
+    w(r"Platform & Resource & Measured column\\\midrule")
+    for p in plats:
+        first = True
+        for k in ["cpu", "mem", "gc", "disk", "move"]:
+            src = SOURCES_TABLE[p][k]
+            if src == "--":
+                continue
+            w((PLATFORM_LABEL[p] if first else "") + f" & {LABEL[k]} & {src}\\\\")
+            first = False
+        w(r"\midrule")
+    w(r"\bottomrule\end{tabular}\end{center}")
+    w(r"The \emph{fixed overhead} is not a column: runtime is fitted as $\text{fixed} + \text{per-unit}\times"
+      r"(\text{input rows}+\text{output rows})$ through the medians of the smallest and the largest 20\% of the "
+      r"configurations of the operator, and the fixed part is compared with the median added runtime.")
+    w(r"\textbf{Rating.} For every resource and operator we compute (i) the \emph{signal}: the share of "
+      r"configurations whose median added amount is above the spread between pairs (IQR) and above a floor "
+      r"(1\,ms, 64\,KiB), and (ii) the \emph{magnitude} in the median configuration: for CPU and GC the share of the "
+      r"operator's added runtime (CPU time $/$ (wall time $\times$ threads)); for memory, disk and data movement "
+      r"bytes per input byte; for the fixed overhead its share of the median added runtime. "
+      r"\high~\emph{important}: signal $\geq$ 50\% and magnitude $\geq$ 0.30 (time) or 0.50 (bytes); "
+      r"\some~\emph{sometimes}: signal $\geq$ 20\% and magnitude $\geq$ 0.05, or the 90th percentile $\geq$ the "
+      r"important threshold; \low~\emph{negligible}: otherwise. A superscript $-$ means the operator \emph{reduces} the "
+      r"resource compared to its baseline (e.g.\ a filter sends fewer rows onward). A dot means the operator's added "
+      r"runtime is below noise in more than 80\% of its configurations, so no rating is meaningful.")
+    w(r"\textbf{Input properties.} For every operator we compute the Spearman rank correlation $\rho$ between its "
+      r"added runtime and each property of the configuration (input rows, output rows, distinct keys, row width, "
+      r"selectivity, left$\times$right rows for binary operators). $|\rho|\geq 0.6$ counts as \emph{needed}, "
+      r"$0.3\leq|\rho|<0.6$ as \emph{weak}, below as \emph{not needed}.")
+    # ---- data used
+    w(r"\subsection*{Data used}")
+    w(r"\begin{center}\small\begin{tabular}{lrrr}\toprule Platform & Configurations & Clean pairs & Disturbed pairs left out\\\midrule")
+    for p in plats:
+        w(f"{PLATFORM_LABEL[p]} & {stats[p]['configs']:,} & {stats[p]['pairs']:,} & {stats[p]['disturbed']:,}\\\\".replace(",", "\\,"))
+    w(r"\bottomrule\end{tabular}\end{center}")
+    w(r"Source files: " + ", ".join(r"\path{" + x + "}" for x in sources) + ".")
+    # ---- results per platform
+    w(r"\section{Results by platform}")
+    for p in plats:
+        prs = [r for r in rows if r["platform"] == p]
+        w(r"\subsection{" + PLATFORM_LABEL[p] + "}")
+        w(r"\begin{center}\small\begin{tabular}{l" + "c" * len(RESOURCES) + r"}\toprule")
+        w("Operator & " + " & ".join(LABEL[k] for k in RESOURCES) + r"\\\midrule")
+        for r in prs:
+            w(OP_LABEL.get(r["operator"], r["operator"]) + " & " + " & ".join(cell(r, k) for k in RESOURCES) + r"\\")
+        w(r"\bottomrule\end{tabular}\end{center}")
+        w(r"\textbf{Magnitudes} (median configuration; CPU, GC and fixed overhead: share of added runtime, "
+          r"memory, disk, data movement: bytes per input byte).")
+        w(r"\begin{center}\footnotesize\begin{tabular}{lr" + "r" * len(RESOURCES) + r"}\toprule")
+        w("Operator & Configs & " + " & ".join(LABEL[k] for k in RESOURCES) + r"\\\midrule")
+        for r in prs:
+            if cheap(r):
+                w(OP_LABEL.get(r["operator"], r["operator"]) + f" & {r['configs']} & \\multicolumn{{{len(RESOURCES)}}}{{c}}{{\\emph{{cost below noise}}}}\\\\")
+                continue
+            cells = []
+            for k in RESOURCES:
+                x = r[k]
+                cells.append("--" if x["rating"] == "na" or APPLICABLE.get(p, {}).get(k) is False
+                             else ("--" if x["median"] is None else f"{x['median']:.2f}"))
+            w(OP_LABEL.get(r["operator"], r["operator"]) + f" & {r['configs']} & " + " & ".join(cells) + r"\\")
+        w(r"\bottomrule\end{tabular}\end{center}")
+        w(r"A dash means not applicable or not measured. ``Configs'' is the number of configurations (each with 3--7 pairs) "
+          r"behind the operator's row: ratings from a handful of configurations are weak evidence.")
+        # input properties
+        feats = [x for x in FEATURES if any(r.get("rho", {}).get(x) is not None for r in prs)]
+        w(r"\textbf{Input properties} (Spearman $\rho$ with the operator's added runtime; bold: needed; a dash: not applicable, constant in the data, or fewer than 8 configurations).")
+        w(r"\begin{center}\footnotesize\begin{tabular}{l" + "r" * len(feats) + r"}\toprule")
+        w("Operator & " + " & ".join(FEATURE_TEX[x] for x in feats) + r"\\\midrule")
+        for r in prs:
+            if cheap(r):
+                continue
+            cells = []
+            for x in feats:
+                v = r["rho"].get(x)
+                if v is None:
+                    cells.append("--")
+                elif abs(v) >= DRIVER_RHO:
+                    cells.append(f"\\hl{{{v:+.2f}}}")
+                else:
+                    cells.append(f"{v:+.2f}")
+            w(OP_LABEL.get(r["operator"], r["operator"]) + " & " + " & ".join(cells) + r"\\")
+        w(r"\bottomrule\end{tabular}\end{center}")
+    # ---- implications
+    w(r"\section{What this means for the cost model}")
+    w(r"\begin{itemize}\itemsep2pt")
+    for p in plats:
+        prs = [r for r in rows if r["platform"] == p]
+        needed, some, dropped, unmeasured, cheap_ops = platform_summary(prs, p, stats[p])
+        keep = [RES_TEX[k] for k, _ in needed]
+        fixed_ops = [r for r in prs if not cheap(r) and r["fixed"]["rating"] in ("high", "some")]
+        t = r"\item \textbf{" + PLATFORM_LABEL[p] + r".} Predict " + (", ".join(keep) if keep else "no resource separately")
+        t += "."
+        if dropped:
+            t += " " + ", ".join(RES_TEX[k] for k in dropped).capitalize() + " can be left out or kept as a constant."
+        if fixed_ops:
+            t += (" A per-job fixed cost matters for " + ", ".join(OP_LABEL.get(r["operator"], r["operator"]) for r in fixed_ops) + ".")
+        w(t)
+    w(r"\item \textbf{Inputs.} Use the properties marked needed in the matrices above per operator; properties with "
+      r"$|\rho|<0.3$ for an operator carry no usable signal for it. Output rows is often the strongest driver of "
+      r"filtering and grouping operators, but is unknown before execution: the model should receive Wayang's cardinality "
+      r"estimate for it.")
+    w(r"\end{itemize}")
+    # ---- limits
+    w(r"\section{Limitations}")
+    w(r"\begin{itemize}\itemsep2pt")
+    w(r"\item On the Java platform an operator runs on one thread, so its CPU time equals its runtime: CPU is then "
+      r"the resource by construction, and the other resources decide only what \emph{else} must be predicted.")
+    w(r"\item Ratings describe the configurations that were measured (inputs of $10^3$--$3\cdot10^6$ rows, synthetic "
+      r"data with one row layout); a resource rated negligible here can matter for much larger inputs.")
+    w(r"\item An operator whose cost is below noise in most configurations is not ``unimportant'': it is cheap next to "
+      r"reading and parsing its input. Its cost can still add up in long pipelines.")
+    w(r"\item Data movement for Spark on a single node is the shuffle volume written; only a cluster measures real network "
+      r"traffic between executors.")
+    w(r"\item Energy and hardware counters (cycles, instructions) exist on macOS only and are not part of this analysis.")
+    w(r"\end{itemize}")
+    w(r"\end{document}")
+    return "\n".join(L) + "\n"
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("data", nargs="+", help="pairs.csv files or folders containing them")
     ap.add_argument("--out", default=os.path.join(os.path.dirname(os.path.abspath(__file__)), "results", "feature-importance"))
+    ap.add_argument("--report", action="store_true", help="also write report.tex, a stand-alone LaTeX report")
     a = ap.parse_args()
     data, dropped = load(a.data)
     if not data:
@@ -414,6 +654,9 @@ def main():
     with open(os.path.join(a.out, "feature_importance.tex"), "w") as f:
         f.write(latex(rows, [os.path.relpath(s) for s in sources], dropped))
     write_csv(rows, os.path.join(a.out, "feature_importance.csv"))
+    if a.report:
+        with open(os.path.join(a.out, "report.tex"), "w") as f:
+            f.write(report_tex(rows, data, dropped, [os.path.relpath(x) for x in sources]))
     for p in PLATFORMS:
         if p in data:
             print(f"{PLATFORM_LABEL[p]}: {sum(len(v) for v in data[p].values())} configs, "
@@ -434,7 +677,7 @@ def main():
             cells.append(f"{sym[x['rating']] + ('-' if x['sign'] < 0 and x['rating'] != 'low' else ' ') + m:>8}")
         print(f"{r['platform']:14} {r['operator']:13} " + " ".join(cells) + "  "
               + ("cost below noise" if cheap(r) else r["runtime_drivers"]) + f"   [{r['measurable']:.0%} measurable]")
-    print(f"\nwrote {a.out}/feature_importance.tex and .csv")
+    print(f"\nwrote {a.out}/feature_importance.tex and .csv" + (" and report.tex" if a.report else ""))
 
 
 if __name__ == "__main__":

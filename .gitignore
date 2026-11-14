@@ -8,3 +8,4 @@ test-run/
 prepare.log
 .measure.lock/
 __pycache__/
+server-data/
